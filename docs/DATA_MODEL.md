@@ -65,13 +65,33 @@ The first attempt at dual colour shows the failure mode: `cs_calib.mat` carried 
 interval of `0.054` while the builds carried `0.0534237`. A second copy of a number the data already
 holds drifts by 1.1%, which is half a second across a 48-second track.
 
-## Why masks are looked up by TIME
+## Why one set of masks serves both colours, and why it is looked up by TIME
 
-ER and mito belong to the cell, not to a colour — one segmentation serves both. But a mask page is
-tied to a PAGE of the acquisition, and each colour samples pages differently, so `page = frame + 1`
-gives two different answers for the same instant. The only rule that is right for both is
-`page = f(t_s)`. (This is also the bug the single-colour pipeline still has on de-interleaved runs,
-where every viewer is wrong by the stride.)
+ER and mito belong to the cell, not to a colour, and **one segmentation serves both**. The
+justification is a separation of timescales: the organelles move over seconds to minutes, the frames
+are 27 ms apart, and the two colours are 13 ms apart. The organelle did not go anywhere in between,
+so the mask that is right for one colour at an instant is right for the other.
+
+That is a statement about the biology rather than about the software, so it is **recorded and
+checked** rather than assumed. `dc_masks('check', D)` compares the mask's page interval against the
+frame intervals and the lag between the colours, and says either
+
+> one mask serves both colours: it changes every 2.67 s, 50x slower than the frames and 200x the
+> 13.4 ms between them, so the organelle has not moved between them
+
+or, if someone later images the organelle fast, that at this rate the assumption is no longer safe.
+It is the kind of assumption that stays true until an acquisition changes and then fails silently.
+
+The lookup is **by time** for a separate reason. A mask page belongs to a moment of the acquisition;
+each colour samples the acquisition differently, so `page = frame + 1` gives two different answers
+for one instant and neither is the mask's own numbering. Time is the only index the two colours
+share. (This is also the bug the single-colour pipeline still has on de-interleaved runs, where every
+viewer is wrong by the stride.)
+
+The page rate is **declared, not derived**. Deriving it from page counts needs an exact integer ratio
+between the stacks; real acquisitions rarely give one — the first attempt here carried a 1.1%
+rounding — and when the ratio is not whole the fallback is silently 1, which leaves every frame past
+the end of the organelle stack with no mask at all.
 
 ## What the merge panel must say
 
