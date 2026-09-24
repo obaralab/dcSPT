@@ -63,6 +63,18 @@ was its molecule when mine was seen" against the second. A frame with no partner
 **unmatched, not far** — treating it as a large distance turns "B was not imaged" into "B was not
 there", which is the opposite conclusion and invisible once it reaches a histogram.
 
+## The data model in one paragraph
+
+Per-channel arrays stay per channel — the two colours do not share a frame axis, so `[frames x
+tracks]` cannot hold both without resampling or lying about what a row means. The **merged** view is
+a flat spot list where time is a column rather than an index: every spot carries a **channel flag**
+and a **time on the cell's clock**, and the clock itself lives once per colour in a registry, never
+on a spot. Masks are shared between the colours and looked up **by time**, because `page = frame + 1`
+gives two different answers for one instant. `dc_align` says which of four ways the two clocks relate
+and `dc_merge` resolves any query into an instant — including the case that looks fine and is not:
+same frame COUNT, same interval, offset by half a frame, never simultaneous. Full argument in
+[docs/DATA_MODEL.md](docs/DATA_MODEL.md).
+
 ## Running it
 
 ```matlab
