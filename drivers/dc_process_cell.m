@@ -21,11 +21,12 @@ function R = dc_process_cell(cel, C, prm)
 % OUTPUT R : 1xN struct, one per colour —
 %   .key .label            which colour
 %   .frame .x .y .q        every detection (frame is 0-based WITHIN this colour)
-%   .t_s                   the experiment clock: t0_s + frame * dt_s
+%   .tp .page              the acquisition's own indices for each detection: which timepoint of the
+%                          experiment it belongs to, and which page of the stack it came from
 %   .trackId .spotId       linkage (NaN trackId = detected, not tracked)
 %   .tracks                the raw chains, as dc_track returned them
-%   .dt_s .t0_s            this colour's clock
-%   .stride .offset .pages how its frames sit in the stack it came from
+%   .dt_s                  seconds per frame, carried for REPORTING a result — never an index
+%   .pages .tp_all         this colour's full frame -> page and frame -> timepoint maps
 %   .nFrames .nTracks .nDets
 
 assert(~isempty(C), 'dc_process_cell:noChannels', 'no colours to process');
@@ -36,26 +37,24 @@ for c = 1:numel(C)
     ch = C(c);
     stack = stackFor(cel, ch);
     assert(isfile(stack), 'dc_process_cell:noStack', 'colour %s: no stack at %s', ch.key, stack);
-    info = imfinfo(stack); nPages = numel(info);
-    pages = (ch.offset+1) : ch.stride : nPages;
+    % The pages are the channel map's, read from the acquisition rather than computed from a stride.
+    nfr = ch.nFrames;
     if isfield(prm,'maxFrames') && ~isempty(prm.maxFrames)
-        pages = pages(1:min(numel(pages), prm.maxFrames));
+        nfr = min(nfr, prm.maxFrames);     % both maps truncate together, or they would disagree
     end
-    nfr = numel(pages);
-    assert(nfr > 0, 'dc_process_cell:noFrames', ...
-        'colour %s: offset %d and stride %d select no pages from %d', ch.key, ch.offset, ch.stride, nPages);
+    pages = ch.pages(1:nfr)';
+    tps   = ch.tp(1:nfr);
+    assert(nfr > 0, 'dc_process_cell:noFrames', 'colour %s: no pages', ch.key);
 
+    % dt is carried for REPORTING only — nothing here indexes by it. A colour with none is fine
+    % until something asks for a result in seconds.
     dt = ch.dt_s;
     if ~isfinite(dt) || dt <= 0
-        % Fall back to the stack's own page interval x stride, and say that is what happened — a
-        % derived dt is a guess about the acquisition, not a reading of it.
         dtPage = NaN;
         try, tc = dc_tiff_calib(stack); if isstruct(tc) && isfield(tc,'dt_s'), dtPage = tc.dt_s; end, catch, end
-        assert(isfinite(dtPage) && dtPage > 0, 'dc_process_cell:noDt', ...
-            ['colour %s declares no frame interval and %s carries none in its metadata. Every ' ...
-             'diffusion coefficient and dwell time is reported in seconds, so this cannot be guessed.'], ...
-            ch.key, stack);
-        dt = dtPage * ch.stride;
+        if isfinite(dtPage) && dtPage > 0 && numel(pages) > 1
+            dt = median(diff(pages)) * dtPage;
+        end
     end
 
     [readPage, closeStack] = dc_tiff_pages(stack);
@@ -95,9 +94,10 @@ for c = 1:numel(C)
     end
 
     R(c) = struct('key',ch.key, 'label',ch.label, ...
-        'frame',frame, 'x',x, 'y',y, 'q',q, 't_s', ch.t0_s + frame*dt, ...
+        'frame',frame, 'x',x, 'y',y, 'q',q, ...
+        'tp', tps(frame+1), 'page', pages(frame+1)', ...
         'trackId',trackId, 'spotId',spotId, 'tracks',{tracks}, ...
-        'dt_s',dt, 't0_s',ch.t0_s, 'stride',ch.stride, 'offset',ch.offset, 'pages',pages, ...
+        'dt_s',dt, 'pages',pages(:), 'tp_all',tps(:), ...
         'stack',stack, 'base',baseOf(cel), 'pxUm',px, ...
         'nFrames',nfr, 'nTracks',numel(tracks), 'nDets',tinfo.nDets);
 end
@@ -110,11 +110,6 @@ if isfield(cel,'stacks') && isstruct(cel.stacks) && isfield(cel.stacks, ch.key)
     s = cel.stacks.(ch.key); return
 end
 s = cel.stack;
-if ~isempty(ch.file)
-    [d, b, e] = fileparts(s);
-    cand = fullfile(d, [b ch.file e]);
-    if isfile(cand), s = cand; end
-end
 end
 
 function b = baseOf(cel)
@@ -123,8 +118,8 @@ if isfield(cel,'base') && ~isempty(cel.base), b = char(cel.base); return, end
 end
 
 function R = emptyR()
-R = struct('key','', 'label','', 'frame',[], 'x',[], 'y',[], 'q',[], 't_s',[], ...
-    'trackId',[], 'spotId',[], 'tracks',{{}}, 'dt_s',NaN, 't0_s',0, ...
-    'stride',1, 'offset',0, 'pages',[], 'stack','', 'base','', 'pxUm',NaN, ...
+R = struct('key','', 'label','', 'frame',[], 'x',[], 'y',[], 'q',[], 'tp',[], 'page',[], ...
+    'trackId',[], 'spotId',[], 'tracks',{{}}, 'dt_s',NaN, 'pages',[], 'tp_all',[], ...
+    'stack','', 'base','', 'pxUm',NaN, ...
     'nFrames',0, 'nTracks',0, 'nDets',0);
 end

@@ -1,72 +1,68 @@
 function [S, info] = dc_merge(D, opts)
-%DC_MERGE  Both colours in one list, at one instant — the view the merged panel draws.
+%DC_MERGE  Both colours at one TIMEPOINT — the view the merged panel draws.
 %
-%   S = dc_merge(D)                              every spot of both colours, flagged
-%   [S, info] = dc_merge(D, struct('t_s', t))    what was visible at that instant
-%   ... struct('t_s', t, 'tol_s', tol)           how near in time counts as "then"
-%   ... struct('frame', k, 'ref', 'a')           that frame of colour a, and whatever of b lines up
+%   S = dc_merge(D)                                 every spot of both colours, flagged
+%   [S, info] = dc_merge(D, struct('tp', k))        what each colour has at timepoint k
+%   ... struct('frame', f, 'ref', 'c2')             that frame of c2, and whatever shares its timepoint
 %
-% TIME IS THE INDEX, NOT THE FRAME NUMBER. Frame k of one colour is frame k of the other only when
-% the two share a clock (see dc_align); in every other case stepping by index silently shows two
-% instants at once. So a query by frame is resolved through the reference colour's clock into a
-% time, and the other colour is taken from that time.
+% THE TIMEPOINT IS THE INDEX. A frame query is resolved through the reference colour's own map into
+% a timepoint, and every other colour is taken at THAT timepoint — not at its own frame of the same
+% number, which is a different moment whenever the colours are not matched (see dc_align).
 %
-% WHAT IT REFUSES TO DO. When a colour has no frame within tol_s of the instant asked for, its spots
-% are ABSENT and info says so — it does not fall back to that colour's last known positions. Drawing
-% a stale position beside a current one is how a merged view invents colocalization: the two marks
-% sit together on screen because one of them is old, not because the molecules met.
+% WHAT IT REFUSES TO DO. A colour with no frame at that timepoint contributes NOTHING, and info says
+% so. It does not fall back to that colour's nearest frame: a mark drawn from a neighbouring
+% timepoint sits beside a current one and looks like a coincidence that was never observed. Where
+% the colours are subsampled this is the normal case, not an error — half the timepoints simply have
+% one colour in them.
 %
 % OUTPUT
-%   S     the spot table, filtered: .ch .frame .t_s .x .y .q .trackId .spotId
-%   info  .t_s        the instant resolved to
-%         .perChannel one row per colour: .key .frame .t_s .gap_s .present .n
-%         .missing    the colours with nothing near that instant
-%         .text       one sentence for the panel
+%   S     the spot table, filtered: .ch .frame .tp .page .x .y .q .trackId .trackLocal .spotId
+%   info  .tp .perChannel(.key .frame .page .present .n) .missing .text
 
 if nargin < 2 || ~isstruct(opts), opts = struct(); end
 S = D.spots;
-K = arrayfun(@(c) char(c.key), D.channels(:)', 'uni', 0);
-info = struct('t_s',NaN, 'perChannel',struct('key',{},'frame',{},'t_s',{},'gap_s',{},'present',{},'n',{}), ...
+info = struct('tp',NaN, 'perChannel',struct('key',{},'frame',{},'page',{},'present',{},'n',{}), ...
               'missing',{{}}, 'text','all spots, both colours');
-if isempty(fieldnames(opts)) || (~isfield(opts,'t_s') && ~isfield(opts,'frame')), return; end
+if ~isfield(opts,'tp') && ~isfield(opts,'frame'), return; end
 
-% ---- resolve the instant ----
 if isfield(opts,'frame') && ~isempty(opts.frame)
-    ref = K{1}; if isfield(opts,'ref') && ~isempty(opts.ref), ref = char(opts.ref); end
+    ref = char(D.channels(1).key);
+    if isfield(opts,'ref') && ~isempty(opts.ref), ref = char(opts.ref); end
     c = chanOf(D, ref);
-    t = c.t0_s + double(opts.frame)*c.dt_s;
+    f = double(opts.frame);
+    assert(f >= 0 && f < c.nFrames, 'dc_merge:frameRange', ...
+        'colour ''%s'' has frames 0..%d, not %d', ref, c.nFrames-1, f);
+    tp = c.tp(f+1);
 else
-    t = double(opts.t_s);
+    tp = double(opts.tp);
 end
-info.t_s = t;
-
-% Default tolerance: half the COARSEST frame interval. Anything nearer than that was the nearest
-% thing imaged; anything further away is a different moment.
-tol = max(arrayfun(@(c) c.dt_s, D.channels))/2;
-if isfield(opts,'tol_s') && ~isempty(opts.tol_s), tol = double(opts.tol_s); end
+info.tp = tp;
 
 keep = false(height(S),1);
 for i = 1:numel(D.channels)
     c = D.channels(i);
-    f = round((t - c.t0_s)/c.dt_s);                 % this colour's nearest frame to that instant
-    f = max(f, 0);
-    tf = c.t0_s + f*c.dt_s;
-    gap = tf - t;
-    present = abs(gap) <= tol*(1+1e-9) + 1e-12;
-    m = present & (S.ch == c.key) & (S.frame == f);
+    f = find(c.tp == tp, 1);                 % this colour's frame at that timepoint, if it has one
+    present = ~isempty(f);
+    fr = NaN; pg = NaN; m = false(height(S),1);
+    if present
+        fr = f - 1;                          % 0-based
+        pg = c.pages(f);
+        m = (S.ch == c.key) & (S.frame == fr);
+    end
     keep = keep | m;
-    info.perChannel(end+1) = struct('key',c.key, 'frame',f, 't_s',tf, 'gap_s',gap, ...
+    info.perChannel(end+1) = struct('key',c.key, 'frame',fr, 'page',pg, ...
                                     'present',present, 'n',nnz(m)); %#ok<AGROW>
     if ~present, info.missing{end+1} = c.key; end %#ok<AGROW>
 end
 S = S(keep,:);
 
-parts = arrayfun(@(p) sprintf('%s frame %d (%+.1f ms, %d spots)', p.key, p.frame, 1000*p.gap_s, p.n), ...
+parts = arrayfun(@(p) sprintf('%s frame %g (page %g, %d spots)', p.key, p.frame, p.page, p.n), ...
                  info.perChannel, 'uni', 0);
-info.text = sprintf('t = %.4f s — %s', t, strjoin(parts, ' · '));
+info.text = sprintf('timepoint %d — %s', tp, strjoin(parts, ' · '));
 if ~isempty(info.missing)
-    info.text = sprintf('%s — %s not imaged within %.1f ms of this instant', ...
-        info.text, strjoin(info.missing, ' and '), 1000*tol);
+    info.text = sprintf('timepoint %d — %s · %s has no frame at this timepoint', tp, ...
+        strjoin(parts(~ismember({info.perChannel.key}, info.missing)), ' · '), ...
+        strjoin(info.missing, ' and '));
 end
 end
 
