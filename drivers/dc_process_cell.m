@@ -21,6 +21,9 @@ function R = dc_process_cell(cel, C, prm)
 % OUTPUT R : 1xN struct, one per colour —
 %   .key .label            which colour
 %   .frame .x .y .q        every detection (frame is 0-based WITHIN this colour)
+%   .iMean .iMax .iTot     intensity on the RAW frame over a disk of half the detection diameter.
+%                          iTot is what a bleaching step count reads: a step there is one
+%                          fluorophore's photons leaving, while a mean also tracks the background.
 %   .tp .page              the acquisition's own indices for each detection: which timepoint of the
 %                          experiment it belongs to, and which page of the stack it came from
 %   .trackId .spotId       linkage (NaN trackId = detected, not tracked)
@@ -60,7 +63,10 @@ for c = 1:numel(C)
     [readPage, closeStack] = dc_tiff_pages(stack);
     cleanup = onCleanup(closeStack);
     dets = cell(1, nfr);
-    fr = {}; xs = {}; ys = {}; qs = {};
+    fr = {}; xs = {}; ys = {}; qs = {}; im = {};
+    % The disk the intensity is summed over. Tied to the detection diameter so it follows the PSF
+    % rather than being a second, independently wrong number.
+    rPx = max(1.5, 0.5 * prm.diamUm / px);
     dopts = struct(); if isfield(prm,'detOpts') && isstruct(prm.detOpts), dopts = prm.detOpts; end
     for t = 1:nfr
         raw = double(readPage(pages(t)));
@@ -69,6 +75,10 @@ for c = 1:numel(C)
         n = size(xy,1);
         if n > 0
             fr{end+1} = repmat(t-1, n, 1); xs{end+1} = xy(:,1); ys{end+1} = xy(:,2); qs{end+1} = xy(:,3); %#ok<AGROW>
+            % MEAN/MAX/TOTAL on the RAW frame. Bleaching is counted on TOTAL: a step there is one
+            % fluorophore's worth of photons leaving, whereas a mean moves with the disk's
+            % background as well.
+            im{end+1} = dc_measure(raw, xy(:,1:2), rPx); %#ok<AGROW>
         end
     end
     clear cleanup
@@ -76,7 +86,8 @@ for c = 1:numel(C)
     [tracks, tinfo] = dc_track(dets, prm.linkUm, prm.gapUm, prm.maxGap, px);
 
     frame = cat(1, fr{:}); x = cat(1, xs{:}); y = cat(1, ys{:}); q = cat(1, qs{:});
-    if isempty(frame), frame = zeros(0,1); x = frame; y = frame; q = frame; end
+    I = cat(1, im{:});
+    if isempty(frame), frame = zeros(0,1); x = frame; y = frame; q = frame; I = zeros(0,3); end
     spotId = (0:numel(frame)-1)';
     trackId = nan(numel(frame),1);
     % Label each detection with the track it ended up in, by (frame, x, y) — the tracker returns
@@ -95,6 +106,7 @@ for c = 1:numel(C)
 
     R(c) = struct('key',ch.key, 'label',ch.label, ...
         'frame',frame, 'x',x, 'y',y, 'q',q, ...
+        'iMean',I(:,1), 'iMax',I(:,2), 'iTot',I(:,3), ...
         'tp', tps(frame+1), 'page', pages(frame+1)', ...
         'trackId',trackId, 'spotId',spotId, 'tracks',{tracks}, ...
         'dt_s',dt, 'pages',pages(:), 'tp_all',tps(:), ...
@@ -118,7 +130,8 @@ if isfield(cel,'base') && ~isempty(cel.base), b = char(cel.base); return, end
 end
 
 function R = emptyR()
-R = struct('key','', 'label','', 'frame',[], 'x',[], 'y',[], 'q',[], 'tp',[], 'page',[], ...
+R = struct('key','', 'label','', 'frame',[], 'x',[], 'y',[], 'q',[], ...
+    'iMean',[], 'iMax',[], 'iTot',[], 'tp',[], 'page',[], ...
     'trackId',[], 'spotId',[], 'tracks',{{}}, 'dt_s',NaN, 'pages',[], 'tp_all',[], ...
     'stack','', 'base','', 'pxUm',NaN, ...
     'nFrames',0, 'nTracks',0, 'nDets',0);

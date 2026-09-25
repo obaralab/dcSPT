@@ -24,7 +24,12 @@ function dc_comotion_smoke()
 %      exactly the mistake that would make a steady drift look like real co-motion.
 %   6. MORE STEPS, LESS NOISE, AT THE RATE MEASURED NOT ASSUMED. The null SE falls as k/sqrt(n), and
 %      the n the tool reports as sufficient really does separate coupled from uncoupled pairs.
-%   7. SPANS ARE NOT MIXED. A step over two timepoints is not simultaneous with one over a single
+%   7. CROSS-COLOUR ONLY IS THE DEFAULT, and it is applied before anything is pooled, so a count in
+%      .bins counts what was used. Same-colour pairs are reachable but not by accident.
+%   8. THE PAIR PANEL reads integrated intensity, counts the bleaching steps that were injected into
+%      it, and refuses a same-colour pair — whose two intensity traces could have been swapped by the
+%      linker, which is exactly what a step count must not be handed.
+%   9. SPANS ARE NOT MIXED. A step over two timepoints is not simultaneous with one over a single
 %      timepoint, and pairing them is refused rather than silently averaged.
 %
 % Synthetic; reads no dataset.
@@ -155,16 +160,69 @@ fprintf('(6) SE = %.3f/sqrt(n) (ideal %.3f, penalty %.2fx); 0.1 needs %d steps, 
     N3.k.fitted, N3.k.ideal, N3.k.penalty, big, small);
 fprintf('    %s\n', N3.text);
 
-%% (7) spans are not mixed -----------------------------------------------------------------------
+%% (7) cross-colour is the default -----------------------------------------------------------------
+Rx = dc_comotion(S1, struct('rMaxUm', 3, 'nMin', 20));           % no classes given
+assert(Rx.class == "cross" && all(Rx.steps.class == "cross"), ...
+    'cross-colour must be the default class, got %s', Rx.class);
+assert(all(Rx.steps.chA ~= Rx.steps.chB), 'and every kept pair must span the two colours');
+Rall = dc_comotion(S1, struct('rMaxUm', 3, 'nMin', 20, 'classes', "all"));
+assert(height(Rall.steps) > height(Rx.steps), ...
+    'classes="all" must keep more (%d vs %d)', height(Rall.steps), height(Rx.steps));
+nb2 = Rx.bins(Rx.bins.class=="all" & Rx.bins.rHi <= 0.5, :);
+assert(sum(nb2.n) == nnz(Rx.steps.r <= 0.5), ...
+    'the bins must count only what survived the class filter');
+fprintf('(7) default kept %d cross pairs of %d total; near-field cross cos %+.4f\n', ...
+    height(Rx.steps), height(Rall.steps), sum(nb2.meanCos.*nb2.n)/sum(nb2.n));
+
+%% (8) the pair panel -------------------------------------------------------------------------------
+% A dataset with intensity: each track's trace bleaches in a known number of steps.
+[Db, truthB] = makeSet(nT, cInj, nPair, nFree, sd, 0, 0);
+nStepsInj = 2;                                    % two emitters -> two drops
+Db = addIntensity(Db, nStepsInj);
+Sb = dc_steps(Db);
+Rb = dc_comotion(Sb, struct('rMaxUm', 3, 'nMin', 20));
+Nb = dc_comotion_null(Rb, struct('rNearUm',0.5,'rFarUm',1.5,'nBoot',400));
+
+crossTruth = truthB(truthB.chA ~= truthB.chB, :);
+assert(~isempty(crossTruth), 'the fixture must contain cross-colour coupled pairs');
+k = find(ismember([Rb.pairs.trackA Rb.pairs.trackB], ...
+                  [crossTruth.trackA crossTruth.trackB], 'rows'), 1);
+assert(~isempty(k), 'a coupled cross-colour pair should be in R.pairs');
+
+H = dc_pair_panel(Db, Rb, k, struct('visible','off', 'null', Nb, 'dtS', dt));
+assert(numel(H.ax) == 3 && all(isgraphics(H.ax)), 'three panels');
+assert(H.stepsA.k == nStepsInj && H.stepsB.k == nStepsInj, ...
+    ['both intensity traces must yield the %d bleaching steps that were injected (got %d and %d) ' ...
+     '— if this drifts, the panel is drawing a staircase nobody checked'], ...
+    nStepsInj, H.stepsA.k, H.stepsB.k);
+fprintf('(8) panel: %d shared steps, mean cos %+.3f, %d/%d bleaching steps recovered\n', ...
+    H.n, H.meanCos, H.stepsA.k, H.stepsB.k);
+close(H.fig);
+
+% a same-colour pair must be refused rather than silently drawn
+sameTruth = truthB(truthB.chA == truthB.chB, :);
+if ~isempty(sameTruth)
+    Rs = dc_comotion(Sb, struct('rMaxUm',3, 'nMin',20, 'classes',"all"));
+    ks = find(ismember([Rs.pairs.trackA Rs.pairs.trackB], ...
+                       [sameTruth.trackA sameTruth.trackB], 'rows'), 1);
+    if ~isempty(ks)
+        err = ''; try, dc_pair_panel(Db, Rs, ks, struct('visible','off')); catch ME, err = ME.identifier; end
+        assert(strcmp(err,'dc_pair_panel:notCross'), ...
+            'a same-colour pair must be refused by the panel, got "%s"', err);
+        fprintf('    same-colour pair refused, as it must be\n');
+    end
+end
+
+%% (9) spans are not mixed -----------------------------------------------------------------------
 Dg = makeSet(nT, cInj, nPair, nFree, sd, 0, 0.12);   % 12%% of localizations dropped -> real gaps
 Smix = dc_steps(Dg, struct('span', []));
 if numel(unique(Smix.span)) > 1
     err = ''; try, dc_comotion(Smix); catch ME, err = ME.identifier; end
     assert(strcmp(err,'dc_comotion:mixedSpan'), ...
         'pairing steps of different spans must be refused, got "%s"', err);
-    fprintf('(7) mixed spans refused: %s\n', mat2str(unique(Smix.span)'));
+    fprintf('(9) mixed spans refused: %s\n', mat2str(unique(Smix.span)'));
 else
-    fprintf('(7) the fixture produced no gaps; span guard not exercised\n');
+    fprintf('(9) the fixture produced no gaps; span guard not exercised\n');
 end
 
 fprintf('\nDC-COMOTION SMOKE PASSED.\n');
@@ -248,6 +306,23 @@ truth = table(min(a,b), max(a,b), string(keys(colour(pairIdx(:,1)))'), ...
               'VariableNames', {'trackA','trackB','chA','chB'});
 % dc_comotion keys a pair as (lower id, higher id); match that so a join just works
 assert(all(truth.trackA < truth.trackB), 'coupled pairs must be keyed low-to-high');
+end
+
+function D = addIntensity(D, nSteps)
+% Give every track an intensity trace that bleaches in nSteps discrete drops, so the panel's step
+% count can be checked against a number that was put there on purpose.
+S = D.spots;
+lv = 1200;                                    % counts per emitter
+S.iTot = nan(height(S),1);
+for id = unique(S.trackId)'
+    if ~isfinite(id), continue; end
+    m = find(S.trackId == id);
+    n = numel(m);
+    when = round(linspace(0, n, nSteps+2)); when = when(2:end-1);   % where the drops fall
+    emitters = nSteps + 1 - sum((1:n)' > when, 2);
+    S.iTot(m) = lv*emitters + 18*randn(n,1);  % noise well under a step, so the fit is unambiguous
+end
+D.spots = S;
 end
 
 function r = corr_(x, y)

@@ -51,6 +51,10 @@ function R = dc_comotion(S, opts)
 % at small r, and treat the same-colour curve there as an upper bound.
 %
 % OPTIONS
+%   .classes  "cross"  which pair classes to keep: "cross" (default), "same", or "all". Cross-colour
+%                      only is the default because it is the evidence that cannot be faked by a
+%                      linker swap, and because with two species it is the question being asked.
+%                      "all" restores both and fills the 'same' rows of .bins.
 %   .rMaxUm   3      ignore pairs further apart than this at that step (keeps the pair count sane)
 %   .nMin     20     a pair needs this many shared steps to get a row in R.pairs
 %   .edgesUm  []     separation bin edges; default 0:0.1:1, then 1.25:0.25:2, then 2.5, 3
@@ -69,6 +73,7 @@ function R = dc_comotion(S, opts)
 
 if nargin < 2 || ~isstruct(opts), opts = struct(); end
 rMax  = getf(opts,'rMaxUm', 3);
+cls0  = string(getf(opts,'classes', "cross"));
 nMin  = getf(opts,'nMin', 20);
 maxP  = getf(opts,'maxPairs', 5e6);
 edges = getf(opts,'edgesUm', [0:0.1:1, 1.25:0.25:2, 2.5, 3]);
@@ -119,13 +124,25 @@ chB = string(values(chOf, num2cell(B)));
 cls = repmat("same", numel(A), 1);
 cls(chA ~= chB) = "cross";
 
+% Drop the classes the caller did not ask for BEFORE anything is binned or pooled, so a count in
+% .bins is a count of what was actually used.
+if cls0 ~= "all"
+    keepC = cls == cls0;
+    assert(any(keepC), 'dc_comotion:noPairsOfClass', ...
+        ['no %s-colour pairs: %d pairs found, all %s-colour. With classes="cross" both colours must ' ...
+         'have tracks alive at the same timepoints and within rMaxUm of each other.'], ...
+        cls0, numel(A), cls(1));
+    A=A(keepC); B=B(keepC); chA=chA(keepC); chB=chB(keepC); cls=cls(keepC);
+    TP=TP(keepC); RR=RR(keepC); DT=DT(keepC); CS=CS(keepC); uA=uA(keepC,:); uB=uB(keepC,:);
+end
+
 % The step VECTORS are kept, not just the products: the time-shifted null in dc_comotion_null needs
 % to pair A's step with B's from another moment, which cannot be recovered from a cosine.
 R.steps = table(A, B, chA, chB, cls, TP, RR, DT, CS, uA(:,1), uA(:,2), uB(:,1), uB(:,2), ...
     'VariableNames', {'trackA','trackB','chA','chB','class','tp','r','dot','cos', ...
                       'uax','uay','ubx','uby'});
-R.params = struct('rMaxUm',rMax, 'nMin',nMin, 'edgesUm',edges, 'nSteps',height(S), ...
-                  'nTracks',numel(unique(S.trackId)), 'nStepPairs',numel(A));
+R.params = struct('rMaxUm',rMax, 'nMin',nMin, 'edgesUm',edges, 'classes',cls0, ...
+                  'nSteps',height(S), 'nTracks',numel(unique(S.trackId)), 'nStepPairs',numel(A));
 
 % ---- the curve: every step, binned by separation ------------------------------------------------
 R.bins = binUp(R.steps, uA, uB, edges, "all");
@@ -133,6 +150,8 @@ for c = ["cross","same"]
     m = R.steps.class == c;
     if any(m), R.bins = [R.bins; binUp(R.steps(m,:), uA(m,:), uB(m,:), edges, c)]; end
 end
+% With one class kept, the "all" rows duplicate it; say which class the analysis ran on.
+R.class = cls0;
 
 % ---- the pairs ----------------------------------------------------------------------------------
 assert(max([A;B]) < 1e7, 'dc_comotion:trackIdRange', 'track ids must be below 1e7 to pack a pair key');

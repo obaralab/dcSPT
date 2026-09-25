@@ -71,10 +71,15 @@ if n > 0
     local = double(R.trackId(:));
     assert(all(~isfinite(local) | (local >= 0 & local < max(R.nTracks,1))), 'dc_dataset:badLocalTrack', ...
         'colour ''%s'': a spot names a track index this colour does not have', R.key);
+    % Intensity is optional: a caller that only has positions (a synthetic fixture, an import from
+    % a tracker that did not measure) gets NaN rather than a missing column, so every consumer can
+    % assume the column exists and check isfinite.
     new = table(repmat(categorical({R.key}, K), n, 1), f, ch.tp(f+1), ch.pages(f+1), ...
                 double(R.x(:)), double(R.y(:)), double(R.q(:)), ...
+                col(R,'iMean',n), col(R,'iMax',n), col(R,'iTot',n), ...
                 local + off, local, double(R.spotId(:)), ...
-                'VariableNames', {'ch','frame','tp','page','x','y','q','trackId','trackLocal','spotId'});
+                'VariableNames', {'ch','frame','tp','page','x','y','q', ...
+                                  'iMean','iMax','iTot','trackId','trackLocal','spotId'});
     D.spots = [D.spots; new];
 end
 D = validate(D);
@@ -124,6 +129,10 @@ if any(ok)
 end
 end
 
+function v = col(R, f, n)
+if isfield(R, f) && numel(R.(f)) == n, v = double(R.(f)(:)); else, v = nan(n,1); end
+end
+
 function K = keysOf(C), K = arrayfun(@(c) char(c.key), C(:)', 'uni', 0); end
 
 function K = keysOfTracks(D)
@@ -134,5 +143,7 @@ end
 function T = emptySpots(K)
 T = table(categorical(cell(0,1), K), zeros(0,1), zeros(0,1), zeros(0,1), zeros(0,1), ...
           zeros(0,1), zeros(0,1), zeros(0,1), zeros(0,1), zeros(0,1), ...
-          'VariableNames', {'ch','frame','tp','page','x','y','q','trackId','trackLocal','spotId'});
+          zeros(0,1), zeros(0,1), zeros(0,1), ...
+          'VariableNames', {'ch','frame','tp','page','x','y','q', ...
+                            'iMean','iMax','iTot','trackId','trackLocal','spotId'});
 end
