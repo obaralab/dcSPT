@@ -62,8 +62,19 @@ function s = sentence(A, a, b)
 switch A.relation
     case 'matched'
         s = sprintf(['%s and %s have a frame at every one of the same %d timepoints, so their ' ...
-            'frame numbers correspond exactly. The two exposures of a timepoint are %g page(s) ' ...
-            'apart — consecutive, not simultaneous.'], a.key, b.key, A.nShared, A.pageGap);
+            'frame numbers correspond exactly.'], a.key, b.key, A.nShared);
+        if isfinite(A.pageGap) && A.pageGap > 0
+            % One interleaved file: the two exposures are different pages of it, so they are
+            % sequential however matched the timepoints are.
+            s = sprintf(['%s The two exposures of a timepoint are %g page(s) apart — consecutive, ' ...
+                'not simultaneous.'], s, A.pageGap);
+        else
+            % Separate files, or the same page index in each: nothing here records an offset between
+            % the two exposures. That is what a two-camera setup looks like, but the files cannot
+            % confirm it, so this says what is known rather than asserting simultaneity.
+            s = sprintf(['%s Neither file records an offset between the two exposures, so nothing ' ...
+                'here says whether they were simultaneous (two cameras) or sequential.'], s);
+        end
     case 'subsampled'
         fast = a; slow = b;
         if b.nFrames > a.nFrames, fast = b; slow = a; end

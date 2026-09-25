@@ -34,6 +34,8 @@ function H = dc_pair_panel(D, R, pair, opts)
 %   .minStep    'auto'  passed to dc_pbsa_steps
 %   .dtS        []  seconds per frame, for a time axis; omitted, the axis is in timepoints
 %   .visible    'on'
+%   .parent     []  a figure, panel or tab to draw into instead of a new figure, so the app can host
+%                   the same panel it would otherwise pop up. The container is cleared first.
 %
 % OUTPUT H: .fig .ax(3) .stepsA .stepsB (the dc_pbsa_steps results) .n .meanCos .rMedian
 
@@ -79,9 +81,16 @@ assert(~isempty(st), 'dc_pair_panel:noSteps', 'no shared steps for this pair');
 xs = @(tp) toX(tp, dtS);
 xl = 'timepoint'; if ~isempty(dtS), xl = 'time (s)'; end
 
-H.fig = figure('Color','w','Visible',vis,'Position',[60 60 1040 860], ...
-    'Name', sprintf('pair %g-%g', idA, idB));
-tl = tiledlayout(H.fig, 3, 1, 'TileSpacing','compact', 'Padding','compact');
+par = getf(opts,'parent',[]);
+if isempty(par)
+    H.fig = figure('Color','w','Visible',vis,'Position',[60 60 1040 860], ...
+        'Name', sprintf('pair %g-%g', idA, idB));
+    par = H.fig; H.owned = true;
+else
+    delete(allchild(par));            % the caller reuses one container across pairs
+    H.fig = ancestor(par,'figure'); H.owned = false;
+end
+tl = tiledlayout(par, 3, 1, 'TileSpacing','compact', 'Padding','compact');
 
 % ---- panels 1 and 2: integrated intensity, with bleaching steps --------------------------------
 [H.ax(1), H.stepsA] = intensityPanel(tl, xs(tA), iA, chA, minSt, xl);

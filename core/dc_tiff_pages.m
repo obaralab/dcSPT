@@ -17,6 +17,13 @@ function [readPage, closeFile] = dc_tiff_pages(path)
 % was opened. Any error opening or reading falls back the same way.
 
 readPage  = @(k) imread(path, k);       % the fallback, and what the checks below must reproduce
+
+% libtiff warns about every tag it does not know, and ImageJ's 50838/50839 are exactly the tags this
+% toolkit reads on purpose (dc_tiff_labels). Left on, a 6000-page stack prints thousands of warnings
+% about metadata that is not merely harmless but wanted. Suppressed for this reader only, and
+% restored on the way out.
+wState = warning('off','imageio:tiffutils:libtiffWarning');
+restoreW = onCleanup(@() warning(wState));
 closeFile = @() [];
 T = [];
 try
