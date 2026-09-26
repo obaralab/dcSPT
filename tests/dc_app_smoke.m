@@ -126,9 +126,14 @@ fprintf('(4) %d spots, %d tracks, intensity measured\n', height(St.D.spots), nTr
 H.api.showFrame(5);
 tr = getappdata(H.fig,'track');
 assert(tr.tp == 5, 'the track view should be on the timepoint it was asked for, got %d', tr.tp);
-assert(~isempty(tr.ax.Children), 'the composite and its overlays should have been drawn');
-nIm = numel(findobj(tr.ax,'Type','image'));
-assert(nIm == 1, 'exactly one composite image, got %d', nIm);
+assert(numel(tr.ax) == 3, 'the Track tab shows each colour and the merge: three panels, got %d', numel(tr.ax));
+assert(all(arrayfun(@(a) ~isempty(a.Children), tr.ax)), 'all three panels should have been drawn');
+assert(all(arrayfun(@(a) numel(findobj(a,'Type','image')) == 1, tr.ax)), ...
+    'exactly one image per panel');
+% the separate panels carry one colour's tracks each; the merge carries both
+nl = arrayfun(@(a) numel(findobj(a,'Type','line')), tr.ax);
+assert(nl(3) >= max(nl(1), nl(2)), ...
+    'the merged panel should hold at least as many overlays as either single-colour one (%s)', mat2str(nl));
 St0 = H.api.state();
 nBefore = numel(unique(St0.D.spots.trackId(isfinite(St0.D.spots.trackId))));
 victim = St0.D.spots.trackId(find(isfinite(St0.D.spots.trackId),1));
@@ -145,7 +150,8 @@ assert(height(St1.Draw.spots) == height(St0.Draw.spots) && ...
 H.api.curate(victim);                        % toggling it back restores the track
 assert(numel(unique(H.api.state().D.spots.trackId(isfinite(H.api.state().D.spots.trackId)))) == nBefore, ...
     'rejecting the same track again should restore it');
-fprintf('(4b) composite drawn at tp %d; curation blanks and restores (%d tracks)\n', tr.tp, nBefore);
+fprintf('(4b) three panels drawn at tp %d (%s overlays); curation blanks and restores (%d tracks)\n', ...
+    tr.tp, mat2str(nl), nBefore);
 
 %% (5) co-motion, cross-colour only ----------------------------------------------------------------
 % There must be ROOM between rFarUm and rMaxUm, or the "far" population is a thin shell and the null

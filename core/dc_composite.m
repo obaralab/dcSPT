@@ -20,7 +20,11 @@ function [rgb, info] = dc_composite(imA, imB, opts)
 %   .mode   'composite' (default) | 'a' | 'b'   — one channel alone still goes through the same
 %           scaling, so stepping between views does not also change the contrast
 %   .loA .hiA .loB .hiB   display limits; empty means the percentiles below
-%   .pct    [1 99.8] the percentiles used when a limit is not given
+%   .pct    [50 99.9] the percentiles used when a limit is not given. The LOW one is the median, not
+%           the 1st percentile: in a sparse single-molecule frame almost every pixel is background,
+%           so a 1st-percentile floor maps that background to mid-grey and the picture is a wall of
+%           speckle with the molecules barely above it. Putting the floor at the median sends half
+%           the pixels to black and leaves the range for what is actually bright.
 %   .gamma  1  applied after scaling, for pulling dim spots up without touching the limits
 %
 % OUTPUT
@@ -29,7 +33,7 @@ function [rgb, info] = dc_composite(imA, imB, opts)
 
 if nargin < 3 || ~isstruct(opts), opts = struct(); end
 mode = lower(char(getf(opts,'mode','composite')));
-pct  = getf(opts,'pct',[1 99.8]);
+pct  = getf(opts,'pct',[50 99.9]);
 gam  = getf(opts,'gamma',1);
 
 A = double(imA); B = double(imB);

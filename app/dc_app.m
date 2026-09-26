@@ -57,6 +57,9 @@ co  = struct('rMaxUm',5, 'nMin',20, 'rNearUm',0.5, 'rFarUm',2, 'drift',true);
 % ---- window --------------------------------------------------------------------------------------
 fig = uifigure('Name','dcSPT — two colours, tracked independently, then compared', ...
     'Position',[70 70 1180 760], 'Visible', vis);
+% A player left running after the window goes keeps firing into deleted handles, once per tick,
+% forever. Stop both before anything is torn down.
+fig.CloseRequestFcn = @(s,e) onClose();
 gl  = uigridlayout(fig,[2 1],'RowHeight',{32,'1x'},'Padding',[8 8 8 8],'RowSpacing',6);
 top = uigridlayout(gl,[1 9],'ColumnWidth',{'1x',94,76,116,84,58,70,64,60}, ...
     'Padding',[0 0 0 0],'ColumnSpacing',6);
@@ -380,6 +383,16 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
         detectPreview();
     end
 
+    function onClose()
+        for nm = {'track','pair'}
+            d = getappdata(fig, nm{1});
+            if isstruct(d) && isfield(d,'timer') && ~isempty(d.timer) && isvalid(d.timer)
+                stop(d.timer); delete(d.timer);
+            end
+        end
+        delete(fig);
+    end
+
     function q = getPool(), q = pool; end
     function c = getCells(), stash(); c = cells; end
 
@@ -493,15 +506,16 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
         uieditfield(r1,'numeric','Value',0,'Limits',[0 1e6],'RoundFractionalValues',true, ...
             'ValueChangedFcn',@(s,e) setParam('maxFrames', tern(s.Value>0, s.Value, [])));
         uibutton(r1,'Text','Track both','FontWeight','bold','ButtonPushedFcn',@(s,e) runTracking());
-        uibutton(r1,'Text','▶ Play','ButtonPushedFcn',@(s,e) onPlay());
+        btnPlayT = uibutton(r1,'Text','▶ Play','ButtonPushedFcn',@(s,e) onPlay());
 
         r2 = uigridlayout(cp,[1 8],'ColumnWidth',{'1x',120,104,74,96,74,96,86}, ...
             'Padding',[0 0 0 0],'ColumnSpacing',6);
         sldT = uislider(r2,'Limits',[1 100],'Value',1,'MajorTicks',[], ...
             'ValueChangingFcn',@(s,e) showTrackFrame(round(e.Value)));
-        ddView = uidropdown(r2,'Items',{'composite','c1 only','c2 only'}, ...
-            'ItemsData',{'composite','a','b'},'Value','composite', ...
-            'ValueChangedFcn',@(s,e) showTrackFrame([]));
+        % No view dropdown: all three are on screen at once. Each colour alone in grey is how a
+        % detection is judged; the merge is how a pair is. Making them alternatives meant flipping
+        % back and forth to answer two questions about the same frame.
+        ddView = uilabel(r2,'Text','c1 · c2 · merged','FontColor',[0.45 0.45 0.5]);
         uilabel(r2,'Text','Tail (frames)','HorizontalAlignment','right');
         spnTail = uieditfield(r2,'numeric','Value',40,'Limits',[1 1e5],'RoundFractionalValues',true, ...
             'Tooltip','How much of each track''s history to draw behind it.', ...
@@ -520,19 +534,23 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
         r3 = uigridlayout(cp,[1 1],'Padding',[0 0 0 0]);
         lblTrk = uilabel(r3,'Text','Track both colours to see them here.','FontColor',[0.35 0.35 0.4]);
 
-        % The axes lives in a uipanel, not directly in the grid. A uiaxes that is a grid child
+        % Each axes lives in a uipanel, not directly in the grid. A uiaxes that is a grid child
         % resizes ITSELF to the data aspect ratio and will happily grow past its cell, ending up
         % underneath whatever is in the next row; inside a panel it letterboxes within a fixed box.
-        pnlT = uipanel(g,'BorderType','none');
-        axT = uiaxes(pnlT); axT.Units = 'normalized'; axT.Position = [0.05 0.06 0.90 0.88];
-        title(axT,'composite');
-        axT.Toolbar.Visible = 'on';
+        row3 = uigridlayout(g,[1 3],'ColumnWidth',{'1x','1x','1x'},'Padding',[0 0 0 0],'ColumnSpacing',6);
+        axT = gobjects(1,3);
+        for i = 1:3
+            pn = uipanel(row3,'BorderType','none');
+            axT(i) = uiaxes(pn); axT(i).Units = 'normalized'; axT(i).Position = [0.08 0.07 0.87 0.85];
+            axT(i).Toolbar.Visible = 'on';
+        end
 
         lg = uigridlayout(g,[1 1],'Padding',[0 0 0 0]);
         txtT = uitextarea(lg,'Editable','off','Value',{''},'FontName','Menlo','FontSize',11);
 
         setappdata(fig,'track', struct('ax',axT,'sld',sldT,'view',ddView,'tail',spnTail, ...
-            'gamma',spnGam,'paths',chkPaths,'lbl',lblTrk,'log',txtT,'tp',1,'timer',[]));
+            'gamma',spnGam,'paths',chkPaths,'lbl',lblTrk,'log',txtT,'tp',1,'timer',[], ...
+            'play',btnPlayT));
     end
 
     function onMinLen(v)
@@ -570,7 +588,7 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
 
     function onRejectClick()
         t = getappdata(fig,'track');
-        cp = t.ax.CurrentPoint;
+        cp = t.ax(3).CurrentPoint;      % the merged panel is where a click is aimed
         if isempty(cp) || isempty(St.D), return; end
         xy = cp(1,1:2) * St.pxUm;
         S = St.D.spots(St.D.spots.tp == t.tp & isfinite(St.D.spots.trackId), :);
@@ -582,7 +600,7 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
 
     function showTrackFrame(tp)
         t = getappdata(fig,'track');
-        if isempty(St.D) || ~isgraphics(t.ax), return; end
+        if isempty(St.D) || ~all(isgraphics(t.ax)), return; end   % t.ax is the three panels
         if isempty(tp), tp = t.tp; end
         tp = max(1, round(tp));
         nTp = max(St.C(1).tp);
@@ -593,29 +611,42 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
         if isempty(pgA) || isempty(pgB), return; end
         A = double(imread(St.stacks{1}, pgA));
         B = double(imread(St.stacks{2}, pgB));
-        rgb = dc_composite(A, B, struct('mode', t.view.Value, 'gamma', t.gamma.Value));
-
-        [xl, yl] = keepView(t.ax, size(A));
-        cla(t.ax);
-        image(t.ax, rgb);
-        % 'axis image' resizes the AXES to the data's aspect, and inside a uigridlayout that lets it
-        % grow past its cell and sit under the log box. Fix the data aspect and the limits instead,
-        % and let the layout keep owning the box.
-        set(t.ax, 'DataAspectRatio',[1 1 1], 'YDir','reverse', ...
-                  'XLim',[0.5 size(rgb,2)+0.5], 'YLim',[0.5 size(rgb,1)+0.5]);
-        hold(t.ax,'on');
         if t.paths.Value, tail = t.tail.Value; else, tail = 1; end
-        hA = dc_draw(t.ax, 'tracks', St.D, tp, struct('ch',chKey(1),'colour',[1 0.45 1], ...
-            'pxUm',St.pxUm, 'rPx',(prm.diamUm/St.pxUm)/2, 'tail',tail));
-        hB = dc_draw(t.ax, 'tracks', St.D, tp, struct('ch',chKey(2),'colour',[0.45 1 0.5], ...
-            'pxUm',St.pxUm, 'rPx',(prm.diamUm/St.pxUm)/2, 'tail',tail));
-        hold(t.ax,'off');
-        if ~isempty(xl), xlim(t.ax, xl); ylim(t.ax, yl); end
+        px = St.pxUm; rPx = (prm.diamUm/px)/2;
+        gam = t.gamma.Value;
+
+        [xl, yl] = keepView(t.ax(1), size(A));
+        if isempty(xl), xl = [0.5 size(A,2)+0.5]; yl = [0.5 size(A,1)+0.5]; end
+        names = {sprintf('%s', chKey(1)), sprintf('%s', chKey(2)), 'merged'};
+        nA = 0; nB = 0;
+        for i = 1:3
+            ax = t.ax(i); cla(ax);
+            switch i
+                case 1, im = gray3g(A, gam);
+                case 2, im = gray3g(B, gam);
+                case 3, im = dc_composite(A, B, struct('gamma', gam));
+            end
+            image(ax, im);
+            set(ax,'DataAspectRatio',[1 1 1],'YDir','reverse','XLim',xl,'YLim',yl);
+            hold(ax,'on');
+            if i == 1 || i == 3
+                hA = dc_draw(ax,'tracks',St.D,tp,struct('ch',chKey(1),'colour',[1 0.45 1], ...
+                    'pxUm',px,'rPx',rPx,'tail',tail));
+                nA = hA.n;
+            end
+            if i == 2 || i == 3
+                hB = dc_draw(ax,'tracks',St.D,tp,struct('ch',chKey(2),'colour',[0.45 1 0.5], ...
+                    'pxUm',px,'rPx',rPx,'tail',tail));
+                nB = hB.n;
+            end
+            hold(ax,'off');
+            title(ax, names{i}, 'FontSize', 9);
+        end
         if isgraphics(t.sld), t.sld.Limits = [1 max(nTp,2)]; t.sld.Value = tp; end
-        title(t.ax, sprintf('timepoint %d of %d — magenta %s, green %s', tp, nTp, chKey(1), chKey(2)));
         nDrop = 0; if isfield(St,'nDropped'), nDrop = St.nDropped; end
-        t.lbl.Text = sprintf(['timepoint %d · %d %s tracks and %d %s tracks visible · %d excluded ' ...
-            '(shorter than %d, or rejected)'], tp, hA.n, chKey(1), hB.n, chKey(2), nDrop, prm.minLen);
+        t.lbl.Text = sprintf(['timepoint %d of %d · %d %s tracks and %d %s tracks visible · %d ' ...
+            'excluded (shorter than %d, or rejected)'], tp, nTp, nA, chKey(1), nB, chKey(2), ...
+            nDrop, prm.minLen);
     end
 
     function k = chKey(i)
@@ -630,11 +661,11 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
     function onPlay()
         t = getappdata(fig,'track');
         if ~isempty(t.timer) && isvalid(t.timer)
-            stop(t.timer); delete(t.timer); t.timer = []; setappdata(fig,'track',t);
-            sayT('stopped'); return
+            stop(t.timer); delete(t.timer); t.timer = [];
+            t.play.Text = '▶ Play'; setappdata(fig,'track',t); return
         end
         t.timer = timer('ExecutionMode','fixedSpacing','Period',0.08,'TimerFcn',@(~,~) tick());
-        setappdata(fig,'track',t); start(t.timer);
+        t.play.Text = '❚❚ Pause'; setappdata(fig,'track',t); start(t.timer);
     end
     function tick()
         t = getappdata(fig,'track');
@@ -654,96 +685,147 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
 
 % ================================ tab 4: co-motion ================================================
     function buildComotion(parent)
-        g = uigridlayout(parent,[3 1],'RowHeight',{62,'1x',96},'Padding',[10 10 10 10],'RowSpacing',8);
+        % Two questions, in the order you ask them: IS there co-motion at short range, and WHICH
+        % pairs. The verdict goes at the top in words; the two plots under it are the evidence for
+        % it; the list is what you click.
+        %
+        % The old third plot was the null's SE against n on log axes. That is a diagnostic about the
+        % method, not an answer about the data, and it sat where the answer should be. The
+        % near-versus-far histogram replaces it: two distributions of the same quantity, one for
+        % pairs that were close and one for pairs that were not. If the near one is shifted right,
+        % there is co-motion, and you can see it without reading an axis.
+        g = uigridlayout(parent,[4 1],'RowHeight',{30,52,'1x',72},'Padding',[10 10 10 10],'RowSpacing',7);
 
-        r = uigridlayout(g,[2 1],'RowHeight',{26,26},'Padding',[0 0 0 0],'RowSpacing',5);
-        r1 = uigridlayout(r,[1 12],'ColumnWidth',{84,60,94,60,84,60,80,60,104,'1x',126,86}, ...
-            'Padding',[0 0 0 0],'ColumnSpacing',6);
-        uilabel(r1,'Text','Max r (µm)','HorizontalAlignment','right');
-        uieditfield(r1,'numeric','Value',co.rMaxUm,'Limits',[0.1 20], ...
-            'ValueChangedFcn',@(s,e) setCo('rMaxUm',s.Value));
+        r1 = uigridlayout(g,[1 12],'ColumnWidth',{84,56,96,56,84,56,78,56,108,'1x',122,84}, ...
+            'Padding',[0 0 0 0],'ColumnSpacing',5);
         uilabel(r1,'Text','Near ≤ (µm)','HorizontalAlignment','right');
         uieditfield(r1,'numeric','Value',co.rNearUm,'Limits',[0.02 20], ...
+            'Tooltip','The cutoff that defines "nearby". Only pairs inside it are listed — they are the measurement.', ...
             'ValueChangedFcn',@(s,e) setCo('rNearUm',s.Value));
-        uilabel(r1,'Text','Far > (µm)','HorizontalAlignment','right');
+        uilabel(r1,'Text','Null starts at (µm)','HorizontalAlignment','right');
         uieditfield(r1,'numeric','Value',co.rFarUm,'Limits',[0.05 20], ...
             'Tooltip','Pairs beyond this build the null: same movie, same drift, too far to interact.', ...
             'ValueChangedFcn',@(s,e) setCo('rFarUm',s.Value));
+        uilabel(r1,'Text','Max r (µm)','HorizontalAlignment','right');
+        uieditfield(r1,'numeric','Value',co.rMaxUm,'Limits',[0.1 40], ...
+            'Tooltip','Outer cap. The null is the shell between "null starts at" and this, so leave room.', ...
+            'ValueChangedFcn',@(s,e) setCo('rMaxUm',s.Value));
         uilabel(r1,'Text','Min steps','HorizontalAlignment','right');
         uieditfield(r1,'numeric','Value',co.nMin,'Limits',[3 1e5],'RoundFractionalValues',true, ...
             'ValueChangedFcn',@(s,e) setCo('nMin',s.Value));
         chkDrift = uicheckbox(r1,'Text','Remove drift','Value',co.drift, ...
             'Tooltip',['Subtract the per-timepoint median step. Drift correlates EVERY pair at every ' ...
-                       'separation and biases the mean, so more data makes it look more significant.'], ...
+                       'separation and biases the mean, so more data makes it look MORE significant.'], ...
             'ValueChangedFcn',@(s,e) setCo('drift',s.Value));
         uilabel(r1,'Text','');
         uibutton(r1,'Text','Run co-motion','FontWeight','bold','ButtonPushedFcn',@(s,e) runComotion());
         uibutton(r1,'Text','Export…','ButtonPushedFcn',@(s,e) onExport());
 
-        r2 = uigridlayout(r,[1 1],'Padding',[0 0 0 0]);
-        lblCo = uilabel(r2,'Text','Cross-colour pairs only.','FontColor',[0.35 0.35 0.4],'WordWrap','on');
+        vp = uigridlayout(g,[2 1],'RowHeight',{26,22},'Padding',[0 0 0 0],'RowSpacing',2);
+        lblVerdict = uilabel(vp,'Text','Run co-motion to see whether nearby tracks move together.', ...
+            'FontSize',15,'FontWeight','bold','FontColor',[0.25 0.25 0.3]);
+        lblCo = uilabel(vp,'Text','','FontColor',[0.4 0.4 0.45],'WordWrap','on');
 
-        mid = uigridlayout(g,[1 2],'ColumnWidth',{'1.15x','1x'},'Padding',[0 0 0 0],'ColumnSpacing',8);
-        axC = uiaxes(mid); title(axC,'co-motion vs separation');
-        rp  = uigridlayout(mid,[2 1],'RowHeight',{'1x',150},'Padding',[0 0 0 0],'RowSpacing',6);
-        tblP = uitable(rp,'ColumnName',{'A','B','n','r (nm)','cos','z'}, ...
-            'ColumnWidth',{52,52,56,66,66,56},'RowName',{}, ...
-            'CellSelectionCallback',@(s,e) onPickPair(e));
-        axN = uiaxes(rp); title(axN,'steps needed');
+        mid = uigridlayout(g,[1 3],'ColumnWidth',{'1.1x','0.85x','1.05x'},'Padding',[0 0 0 0],'ColumnSpacing',8);
+        axC = uiaxes(mid);
+        axH = uiaxes(mid);
+        tblP = uitable(mid,'ColumnName',{'A','B','n','r (nm)','cos','z'}, ...
+            'ColumnWidth',{54,54,50,62,58,52},'RowName',{}, ...
+            'SelectionType','row','CellSelectionCallback',@(s,e) onPickPair(e));
 
         lg = uigridlayout(g,[1 1],'Padding',[0 0 0 0]);
         txtCo = uitextarea(lg,'Editable','off','Value',{''},'FontName','Menlo','FontSize',11);
 
-        setappdata(fig,'co', struct('axC',axC,'axN',axN,'tbl',tblP,'lbl',lblCo,'log',txtCo,'drift',chkDrift));
+        setappdata(fig,'co', struct('axC',axC,'axH',axH,'tbl',tblP,'lbl',lblCo, ...
+            'verdict',lblVerdict,'log',txtCo,'drift',chkDrift));
     end
 
 % ================================ tab 4: pair =====================================================
     function buildPair(parent)
-        % One cross-colour pair, two ways at once: over the raw composite on the left, with the step
-        % vectors as a quiver, and its traces on the right. The picture is what tells you whether a
-        % high cosine is two molecules travelling together or two unrelated ones that happened to
-        % drift the same way for a while — a number cannot distinguish those and a quiver can.
-        g = uigridlayout(parent,[3 1],'RowHeight',{30,26,'1x'},'Padding',[8 8 8 8],'RowSpacing',5);
+        % THREE panels, not one. A magenta/green merge is the right picture for "are these two in
+        % the same place", and the wrong one for "is this detection real": on a sparse, noisy frame
+        % the merge turns background speckle into coloured confetti and a single molecule has to
+        % compete with it. Each colour on its own, in grey, is how you judge the spot; the merge is
+        % how you judge the pair. Showing all three costs nothing and each answers its own question.
+        g = uigridlayout(parent,[3 1],'RowHeight',{30,28,'1x'},'Padding',[8 8 8 8],'RowSpacing',5);
 
-        hr = uigridlayout(g,[1 7],'ColumnWidth',{'1x',78,78,96,74,120,96},'Padding',[0 0 0 0],'ColumnSpacing',6);
+        hr = uigridlayout(g,[1 8],'ColumnWidth',{'1x',74,74,70,100,66,86,96},'Padding',[0 0 0 0],'ColumnSpacing',6);
         lblPair = uilabel(hr,'Text','Select a pair in the Co-motion tab.','FontColor',[0.35 0.35 0.4]);
         uibutton(hr,'Text','◀ prev','ButtonPushedFcn',@(s,e) stepPair(-1));
         uibutton(hr,'Text','next ▶','ButtonPushedFcn',@(s,e) stepPair(+1));
+        btnPlayP = uibutton(hr,'Text','▶ Play','ButtonPushedFcn',@(s,e) onPairPlay());
         uilabel(hr,'Text','Window (steps)','HorizontalAlignment','right');
         spnWin = uieditfield(hr,'numeric','Value',40,'Limits',[4 1e4],'RoundFractionalValues',true, ...
-            'Tooltip','How many timepoints of the pair to draw around the slider position.', ...
-            'ValueChangedFcn',@(s,e) redrawPair());
+            'ValueChangedFcn',@(s,e) drawPairImage());
         chkQuiv = uicheckbox(hr,'Text','Quiver','Value',true, ...
-            'Tooltip','Draw each step as an arrow from where the molecule was. This is the co-motion itself.', ...
-            'ValueChangedFcn',@(s,e) redrawPair());
+            'Tooltip','Each step as an arrow from where the molecule was. This IS the co-motion.', ...
+            'ValueChangedFcn',@(s,e) drawPairImage());
         chkZoom = uicheckbox(hr,'Text','Zoom to pair','Value',true, ...
-            'ValueChangedFcn',@(s,e) redrawPair());
+            'ValueChangedFcn',@(s,e) drawPairImage());
 
-        sr = uigridlayout(g,[1 2],'ColumnWidth',{'1x',150},'Padding',[0 0 0 0],'ColumnSpacing',6);
+        sr = uigridlayout(g,[1 3],'ColumnWidth',{'1x',150,110},'Padding',[0 0 0 0],'ColumnSpacing',6);
         sldP = uislider(sr,'Limits',[1 100],'Value',1,'MajorTicks',[], ...
             'ValueChangingFcn',@(s,e) onPairSlide(e.Value));
         lblTp = uilabel(sr,'Text','—','FontName','Menlo','FontSize',11);
+        spnFps = uieditfield(sr,'numeric','Value',12,'Limits',[1 60], ...
+            'Tooltip','Playback rate, frames per second.');
 
-        mn = uigridlayout(g,[1 2],'ColumnWidth',{'1.05x','1x'},'Padding',[0 0 0 0],'ColumnSpacing',8);
-        pnl = uipanel(mn,'BorderType','none');          % see the Track tab: keeps the aspect in its box
-        axP = uiaxes(pnl); axP.Units='normalized'; axP.Position=[0.06 0.07 0.90 0.86];
-        host = uipanel(mn,'BorderType','none');
+        % Images left, traces right. The three image panels share the left half: each colour on its
+        % own along the top, the merge beneath them spanning both — the merge is the one you read
+        % the pair off, so it gets the wider box.
+        mn = uigridlayout(g,[1 2],'ColumnWidth',{'1.15x','1x'},'Padding',[0 0 0 0],'ColumnSpacing',8);
+        imgs = uigridlayout(mn,[2 2],'RowHeight',{'1x','1.15x'},'ColumnWidth',{'1x','1x'}, ...
+            'Padding',[0 0 0 0],'RowSpacing',4,'ColumnSpacing',4);
+        axP = gobjects(1,3);
+        for i = 1:3
+            pn = uipanel(imgs,'BorderType','none');
+            if i == 3, pn.Layout.Row = 2; pn.Layout.Column = [1 2]; end
+            axP(i) = uiaxes(pn); axP(i).Units='normalized'; axP(i).Position=[0.10 0.09 0.85 0.82];
+        end
+        host = uipanel(mn,'BorderType','none');       % the traces get the whole right half
 
         setappdata(fig,'pair', struct('host',host,'ax',axP,'lbl',lblPair,'k',0,'tp',1, ...
-            'win',spnWin,'quiv',chkQuiv,'zoom',chkZoom,'sld',sldP,'tpLbl',lblTp));
+            'win',spnWin,'quiv',chkQuiv,'zoom',chkZoom,'sld',sldP,'tpLbl',lblTp, ...
+            'play',btnPlayP,'fps',spnFps,'timer',[]));
     end
 
     function onPairSlide(v)
         pp = getappdata(fig,'pair'); pp.tp = round(v); setappdata(fig,'pair',pp);
         drawPairImage();
     end
-    function redrawPair()
+
+    function onPairPlay()
+        pp = getappdata(fig,'pair');
+        if ~isempty(pp.timer) && isvalid(pp.timer)
+            stop(pp.timer); delete(pp.timer); pp.timer = [];
+            pp.play.Text = '▶ Play'; setappdata(fig,'pair',pp); return
+        end
+        pp.timer = timer('ExecutionMode','fixedSpacing','Period',max(1/pp.fps.Value,0.03), ...
+                         'TimerFcn',@(~,~) pairTick());
+        pp.play.Text = '❚❚ Pause'; setappdata(fig,'pair',pp); start(pp.timer);
+    end
+    function pairTick()
+        pp = getappdata(fig,'pair');
+        if ~isgraphics(fig) || isempty(St.R) || pp.k < 1
+            if ~isempty(pp.timer) && isvalid(pp.timer), stop(pp.timer); delete(pp.timer); end
+            return
+        end
+        tps = pairTps(pp.k);
+        if isempty(tps), return; end
+        nxt = pp.tp + 1; if nxt > max(tps), nxt = min(tps); end
+        pp.tp = nxt; setappdata(fig,'pair',pp);
         drawPairImage();
+    end
+    function tps = pairTps(k)
+        tps = [];
+        if isempty(St.R) || k < 1 || k > height(St.R.pairs), return; end
+        m = St.R.steps.trackA == St.R.pairs.trackA(k) & St.R.steps.trackB == St.R.pairs.trackB(k);
+        tps = sort(St.R.steps.tp(m));
     end
 
     function drawPairImage()
         pp = getappdata(fig,'pair');
-        if isempty(St.R) || pp.k < 1 || pp.k > height(St.R.pairs) || ~isgraphics(pp.ax), return; end
+        if isempty(St.R) || pp.k < 1 || pp.k > height(St.R.pairs) || ~all(isgraphics(pp.ax)), return; end
         row = St.R.pairs(pp.k,:);
         idA = row.trackA; idB = row.trackB;
 
@@ -753,54 +835,78 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
         tps = st.tp;
         tpNow = min(max(pp.tp, min(tps)), max(tps));
         w = pp.win.Value;
-        inWin = tps >= tpNow - w/2 & tps <= tpNow + w/2;
-        sw = st(inWin,:);
+        sw = st(tps >= tpNow - w/2 & tps <= tpNow + w/2, :);
 
         pgA = pageFor(1, tpNow); pgB = pageFor(2, tpNow);
         if isempty(pgA) || isempty(pgB), return; end
         A = double(imread(St.stacks{1}, pgA));
         B = double(imread(St.stacks{2}, pgB));
-        rgb = dc_composite(A, B, struct('gamma',0.7));
+        px = St.pxUm; rPx = (prm.diamUm/px)/2;
 
-        cla(pp.ax);
-        image(pp.ax, rgb);
-        set(pp.ax,'DataAspectRatio',[1 1 1],'YDir','reverse', ...
-                  'XLim',[0.5 size(rgb,2)+0.5], 'YLim',[0.5 size(rgb,1)+0.5]);
-        hold(pp.ax,'on');
-
-        px = St.pxUm;
-        hp = dc_draw(pp.ax, 'pair', St.D, idA, idB, tpNow, ...
-            struct('pxUm',px, 'rPx',(prm.diamUm/px)/2, 'tail',w));
-
-        if pp.quiv.Value && ~isempty(sw)
-            % The step vectors themselves, as arrows from where each molecule was. Two arrow fields
-            % pointing the same way IS the correlation the cosine summarises; drawn together they
-            % also show WHEN it held, which a single number over the whole pair cannot.
-            % Scale 0 and AutoScale off: the arrows are the real displacements, in the image's own
-            % units. MATLAB's default autoscaling would resize them to look tidy, which would make
-            % two arrows of very different length appear comparable — the opposite of the point.
-            quiver(pp.ax, sw.xa/px, sw.ya/px, sw.uax/px, sw.uay/px, 0, ...
-                'Color',[1 0.45 1], 'LineWidth',0.9, 'MaxHeadSize',0.5);
-            quiver(pp.ax, sw.xb/px, sw.yb/px, sw.ubx/px, sw.uby/px, 0, ...
-                'Color',[0.45 1 0.5], 'LineWidth',0.9, 'MaxHeadSize',0.5);
+        % the box the three panels share, so they are comparable at a glance
+        xl = [0.5 size(A,2)+0.5]; yl = [0.5 size(A,1)+0.5];
+        if pp.zoom.Value && ~isempty(sw)
+            pad = max(0.8/px, 3*rPx);
+            xs = [sw.xa; sw.xb]/px; ys = [sw.ya; sw.yb]/px;
+            xl = [min(xs)-pad, max(xs)+pad]; yl = [min(ys)-pad, max(ys)+pad];
         end
-        hold(pp.ax,'off');
 
-        if pp.zoom.Value
-            pad = 1.2 / px;               % 1.2 µm of context around the pair's excursion
-            xs = [sw.xa; sw.xb; sw.xa+sw.uax; sw.xb+sw.ubx]/px;
-            ys = [sw.ya; sw.yb; sw.ya+sw.uay; sw.yb+sw.uby]/px;
-            if ~isempty(xs)
-                xlim(pp.ax, [min(xs)-pad, max(xs)+pad]);
-                ylim(pp.ax, [min(ys)-pad, max(ys)+pad]);
+        names = {sprintf('%s only', chKey(1)), sprintf('%s only', chKey(2)), 'merged'};
+        cols  = {[1 0.45 1], [0.45 1 0.5], []};
+        for i = 1:3
+            ax = pp.ax(i); cla(ax);
+            switch i
+                case 1, im = gray3(A);                       % each colour in GREY on its own:
+                case 2, im = gray3(B);                       % judging a spot should not fight a hue
+                case 3, im = dc_composite(A, B, struct('gamma',0.8));
             end
+            image(ax, im);
+            set(ax,'DataAspectRatio',[1 1 1],'YDir','reverse','XLim',xl,'YLim',yl);
+            hold(ax,'on');
+            if i == 1 || i == 3
+                dc_draw(ax,'tracks',St.D,tpNow,struct('ch',chKey(1),'colour',cols{1}, ...
+                    'pxUm',px,'rPx',rPx,'tail',w,'tracks',idA));
+            end
+            if i == 2 || i == 3
+                dc_draw(ax,'tracks',St.D,tpNow,struct('ch',chKey(2),'colour',cols{2}, ...
+                    'pxUm',px,'rPx',rPx,'tail',w,'tracks',idB));
+            end
+            if i == 3
+                hp = dc_draw(ax,'pair',St.D,idA,idB,tpNow, ...
+                    struct('pxUm',px,'rPx',rPx,'tail',w));
+                if pp.quiv.Value && ~isempty(sw)
+                    % Scale 0, autoscale off: the arrows are the real displacements in the image's
+                    % own units. MATLAB would otherwise resize them to look tidy, which makes two
+                    % arrows of very different length look comparable.
+                    quiver(ax, sw.xa/px, sw.ya/px, sw.uax/px, sw.uay/px, 0, ...
+                        'Color',cols{1}, 'LineWidth',0.9, 'MaxHeadSize',0.5);
+                    quiver(ax, sw.xb/px, sw.yb/px, sw.ubx/px, sw.uby/px, 0, ...
+                        'Color',cols{2}, 'LineWidth',0.9, 'MaxHeadSize',0.5);
+                end
+            end
+            hold(ax,'off');
+            title(ax, names{i}, 'FontSize', 9);
         end
+
         if isgraphics(pp.sld), pp.sld.Limits = [min(tps) max(tps)]; pp.sld.Value = tpNow; end
         pp.tp = tpNow; setappdata(fig,'pair',pp);
-        sep = ''; if isfinite(hp.rNm), sep = sprintf(', %.0f nm apart', hp.rNm); end
-        pp.tpLbl.Text = sprintf('tp %d%s', tpNow, sep);
-        title(pp.ax, sprintf('tracks %g (magenta) and %g (green) — %d steps in view%s', ...
-            idA, idB, height(sw), sep));
+        rNow = NaN;
+        j = find(st.tp == tpNow, 1); if ~isempty(j), rNow = 1000*st.r(j); end
+        pp.tpLbl.Text = sprintf('tp %d · %.0f nm', tpNow, rNow);
+    end
+
+    function g3 = gray3g(X, gam)
+        lo = prctile(X(:),50); hi = prctile(X(:),99.9);
+        if ~(hi>lo), hi = lo+1; end
+        y = min(max((X-lo)/(hi-lo),0),1) .^ gam;
+        g3 = cat(3,y,y,y);
+    end
+
+    function g3 = gray3(X)
+        lo = prctile(X(:),50); hi = prctile(X(:),99.9);
+        if ~(hi>lo), hi = lo+1; end
+        y = min(max((X-lo)/(hi-lo),0),1) .^ 0.8;
+        g3 = cat(3,y,y,y);
     end
 
 % ================================ actions =========================================================
@@ -914,41 +1020,87 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
         St.N = N;
 
         b = R.bins(R.bins.class=="cross", :);
-        cla(c.axC); hold(c.axC,'on');
-        errorbar(c.axC, b.rMid*1000, b.meanCos, 2*b.seCos, 'o-', 'Color',[0.80 0.20 0.20], ...
-            'MarkerFaceColor',[0.80 0.20 0.20], 'MarkerSize',4, 'LineWidth',1.2);
-        yline(c.axC, 0, '-', 'Color',[0.75 0.75 0.75]);
-        ttl = 'cross-colour co-motion';
-        if ~isempty(N)
-            yline(c.axC, N.far.meanCos, '--', 'Color',[0.35 0.4 0.45]);
-            ttl = sprintf('%s — dashed line is the far-field null (%+.4f)', ttl, N.far.meanCos);
-        else
-            ttl = sprintf('%s — no far-field null (too few distant pairs)', ttl);
-        end
-        hold(c.axC,'off'); grid(c.axC,'on');
-        xlabel(c.axC,'separation (nm)'); ylabel(c.axC,'mean cos\theta');
-        title(c.axC, ttl);
 
-        cla(c.axN);
+        % --- the curve, with the null as a BAND rather than a line -------------------------------
+        cla(c.axC); hold(c.axC,'on');
         if ~isempty(N)
-            hold(c.axN,'on');
-            plot(c.axN, N.curve.n, N.curve.seFar, 'o-','Color',[0.15 0.45 0.70],'MarkerSize',3);
-            plot(c.axN, N.curve.n, N.k.ideal./sqrt(N.curve.n), '--','Color',[0.6 0.6 0.6]);
-            if isfinite(N.excess) && N.excess > 0, yline(c.axN, N.excess, ':', 'Color',[0.8 0.3 0.1]); end
-            set(c.axN,'XScale','log','YScale','log'); grid(c.axN,'on'); hold(c.axN,'off');
-            xlabel(c.axN,'steps in a pair'); ylabel(c.axN,'null SE');
-            title(c.axN, sprintf('SE = %.3f/\\surdn (ideal %.3f)', N.k.fitted, N.k.ideal));
-        else
-            title(c.axN, 'steps needed — needs a far-field null');
+            % A band, because "is this point above the null" is the only question being asked of
+            % this plot, and a dashed line makes the reader do the comparison by eye against a
+            % number that has its own uncertainty.
+            sdFar = N.far.sdCos / sqrt(max(N.far.nStepPairs,1));
+            xb = [0 max(b.rHi)*1000];
+            fill(c.axC, [xb fliplr(xb)], ...
+                 [N.far.meanCos-2*sdFar, N.far.meanCos-2*sdFar, ...
+                  N.far.meanCos+2*sdFar, N.far.meanCos+2*sdFar], ...
+                 [0.85 0.88 0.92], 'EdgeColor','none', 'DisplayName','far-field null');
         end
+        errorbar(c.axC, b.rMid*1000, b.meanCos, 2*b.seCos, 'o-', 'Color',[0.80 0.20 0.20], ...
+            'MarkerFaceColor',[0.80 0.20 0.20], 'MarkerSize',4, 'LineWidth',1.3, ...
+            'DisplayName','cross-colour');
+        xline(c.axC, co.rNearUm*1000, ':', 'Color',[0.3 0.5 0.3], 'HandleVisibility','off');
+        yline(c.axC, 0, '-', 'Color',[0.8 0.8 0.8], 'HandleVisibility','off');
+        hold(c.axC,'off'); grid(c.axC,'on');
+        % Show the near field and the start of the null, not the whole outer cap: rMaxUm exists to
+        % collect distant pairs for the null, and plotting out to it squeezes everything that
+        % matters into the first few pixels.
+        xlim(c.axC, [0 min(co.rMaxUm, 2*co.rFarUm)*1000]);
+        ylim(c.axC, 'auto');
+        xlabel(c.axC,'separation (nm)'); ylabel(c.axC,'mean cos\theta');
+        title(c.axC,'co-motion vs separation','FontSize',10);
+        legend(c.axC,'Location','northeast','Box','off','FontSize',8);
+
+        % --- near vs far, as distributions of the SAME quantity -----------------------------------
+        cla(c.axH); hold(c.axH,'on');
+        near = R.steps.cos(R.steps.r <= co.rNearUm);
+        far  = R.steps.cos(R.steps.r >  co.rFarUm);
+        ed = -1:0.1:1;
+        if ~isempty(far)
+            histogram(c.axH, far, ed, 'Normalization','probability', ...
+                'FaceColor',[0.62 0.66 0.70], 'EdgeColor','none', 'DisplayName','far (null)');
+        end
+        if ~isempty(near)
+            histogram(c.axH, near, ed, 'Normalization','probability', ...
+                'FaceColor',[0.80 0.25 0.25], 'FaceAlpha',0.65, 'EdgeColor','none', ...
+                'DisplayName',sprintf('near (\\leq%.2f µm)', co.rNearUm));
+        end
+        if ~isempty(far),  xline(c.axH, mean(far,'omitnan'),  '-', 'Color',[0.35 0.4 0.45], 'HandleVisibility','off'); end
+        if ~isempty(near), xline(c.axH, mean(near,'omitnan'), '-', 'Color',[0.75 0.15 0.15], 'LineWidth',1.4, 'HandleVisibility','off'); end
+        hold(c.axH,'off'); grid(c.axH,'on');
+        xlabel(c.axH,'cos\theta per step'); ylabel(c.axH,'fraction');
+        title(c.axH,'near vs far — shifted right means co-motion','FontSize',10);
+        legend(c.axH,'Location','northwest','Box','off','FontSize',8);
 
         P = R.pairs;
-        c.tbl.Data = [num2cell(P.trackA), num2cell(P.trackB), num2cell(P.n), ...
-                      num2cell(round(P.rMedian*1000)), num2cell(round(P.meanCos,3)), ...
-                      num2cell(round(P.z,2))];
-        c.lbl.Text = sprintf(['%d cross-colour pairs within %.2f µm with %d+ shared steps — click one ' ...
-            'to open it. %d step pairs at every separation feed the null.'], ...
-            height(P), co.rNearUm, co.nMin, height(R.steps));
+        % Formatted as text: a uitable renders a double as "8.0000" and then truncates it, so a
+        % column of track ids reads as measurements with four decimal places.
+        c.tbl.Data = [cellstr(string(P.trackA)), cellstr(string(P.trackB)), ...
+                      cellstr(string(P.n)), cellstr(compose('%.0f', P.rMedian*1000)), ...
+                      cellstr(compose('%+.3f', P.meanCos)), cellstr(compose('%.1f', P.z))];
+
+        % --- the verdict, in words -----------------------------------------------------------------
+        if isempty(N)
+            c.verdict.Text = sprintf('%d pairs within %.2f µm — no null could be built', ...
+                height(P), co.rNearUm);
+            c.verdict.FontColor = [0.45 0.45 0.5];
+        else
+            nSE = N.far.sdCos / sqrt(max(nnz(R.steps.r <= co.rNearUm),1));
+            zz = N.excess / max(nSE, eps);
+            if zz >= 3
+                c.verdict.Text = sprintf(['Nearby tracks DO move together: cos %+.3f within %.2f µm ' ...
+                    'against %+.3f far away (%.0f sigma).'], N.near.meanCos, co.rNearUm, ...
+                    N.far.meanCos, zz);
+                c.verdict.FontColor = [0.65 0.13 0.13];
+            else
+                c.verdict.Text = sprintf(['No co-motion above the null: cos %+.3f within %.2f µm ' ...
+                    'against %+.3f far away (%.1f sigma).'], N.near.meanCos, co.rNearUm, ...
+                    N.far.meanCos, zz);
+                c.verdict.FontColor = [0.3 0.35 0.4];
+            end
+            nNeed = N.nNeeded.steps(end);
+            c.lbl.Text = sprintf(['%d pairs listed (within %.2f µm, %d+ shared steps). A pair needs ' ...
+                'about %d steps to resolve a correlation of %.2f, so %d of them are long enough.'], ...
+                height(P), co.rNearUm, co.nMin, nNeed, N.nNeeded.correlation(end), nnz(P.n >= nNeed));
+        end
         if ~isempty(N), sayCo('%s', N.text); end
         if ~isempty(P), showPair(1); end
     end
