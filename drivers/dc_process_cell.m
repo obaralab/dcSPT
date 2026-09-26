@@ -20,7 +20,8 @@ function R = dc_process_cell(cel, C, prm)
 %
 % OUTPUT R : 1xN struct, one per colour —
 %   .key .label            which colour
-%   .frame .x .y .q        every detection (frame is 0-based WITHIN this colour)
+%   .frame .x .y .q        every detection: frame 0-based WITHIN this colour, x/y in MICRONS
+%                          (detector pixels times pxUm — the unit every downstream ...Um option means)
 %   .iMean .iMax .iTot     intensity on the RAW frame over a disk of half the detection diameter.
 %                          iTot is what a bleaching step count reads: a step there is one
 %                          fluorophore's photons leaving, while a mean also tracks the background.
@@ -78,6 +79,7 @@ for c = 1:numel(C)
             % MEAN/MAX/TOTAL on the RAW frame. Bleaching is counted on TOTAL: a step there is one
             % fluorophore's worth of photons leaving, whereas a mean moves with the disk's
             % background as well.
+            % dc_measure indexes the raw frame, so it takes PIXEL centres — the un-scaled xy.
             im{end+1} = dc_measure(raw, xy(:,1:2), rPx); %#ok<AGROW>
         end
     end
@@ -90,6 +92,10 @@ for c = 1:numel(C)
     if isempty(frame), frame = zeros(0,1); x = frame; y = frame; q = frame; I = zeros(0,3); end
     spotId = (0:numel(frame)-1)';
     trackId = nan(numel(frame),1);
+    % x/y are still DETECTOR PIXELS at this point, and must stay that way until the tracks have been
+    % matched below: dc_track works in pixels and returns pixel positions, and the match is made by
+    % formatting the coordinates into a key. Scaling one side and not the other silently matches
+    % nothing, and every track comes back with no id.
     % Label each detection with the track it ended up in, by (frame, x, y) — the tracker returns
     % positions, not indices back into the detection list.
     keyOf = containers.Map('KeyType','char','ValueType','double');
@@ -103,6 +109,12 @@ for c = 1:numel(C)
             if isKey(keyOf, kk), trackId(keyOf(kk)) = k - 1; end
         end
     end
+
+    % NOW to microns, once the pixel-keyed matching is done. Everything downstream is named ...Um
+    % and documented in um — dc_steps, dc_comotion's radii, dc_masks — so leaving detector pixels
+    % here would make all of those silently mean pixels: on a 0.1 um/px camera a radius of 5 would
+    % be half a micron rather than five.
+    x = x * px;  y = y * px;
 
     R(c) = struct('key',ch.key, 'label',ch.label, ...
         'frame',frame, 'x',x, 'y',y, 'q',q, ...

@@ -1,4 +1,4 @@
-function S = dc_steps(D, opts)
+function [S, info] = dc_steps(D, opts)
 %DC_STEPS  Every track's step vectors, keyed by the TIMEPOINT the step starts at.
 %
 %   S = dc_steps(D)
@@ -15,6 +15,12 @@ function S = dc_steps(D, opts)
 % pairing. Mixing spans inflates the apparent step size of whichever track gapped more, which biases a
 % dot product (um^2) while leaving a cosine alone. The default drops them; 'span', [] keeps all and
 % records the span so a caller can decide.
+%
+% GAP CLOSING AND CO-MOTION PULL AGAINST EACH OTHER, and `info` is how you see it. A tracker allowed
+% to close gaps produces steps that span 2, 3 or more timepoints, and every one of those is dropped
+% here. Raise maxGap to stop tracks fragmenting and you can lose most of the step population the
+% pairing needs — on a 26-track fixture, maxGap 3 left 285 pairable step pairs where maxGap 1 leaves
+% far more. `info.kept` and `info.bySpan` report the trade so it is a decision rather than a surprise.
 %
 % OUTPUT S — one row per step, a table:
 %   .trackId   global track id (unique across the cell; see dc_dataset)
@@ -49,8 +55,19 @@ S = table(tid(1:end-1), P.ch(1:end-1), tp0, tp1, tp1 - tp0, x0, y0, ux, uy, hypo
     'VariableNames', {'trackId','ch','tp0','tp1','span','x','y','ux','uy','len'});
 S = S(keep, :);
 
+nAll = height(S);
+spans = S.span;
 if ~isempty(span)
     S = S(S.span == span, :);
+end
+info = struct('nAll',nAll, 'nKept',height(S), 'span',span, ...
+              'bySpan', [unique(spans), accumarray(findgroups(spans), 1)], 'text','');
+if ~isempty(span) && nAll > 0
+    info.text = sprintf(['%d of %d steps span exactly %d timepoint(s) and are usable; %d were gap-' ...
+        'closed over more and cannot be paired with a single-timepoint step'], ...
+        info.nKept, nAll, span, nAll - info.nKept);
+else
+    info.text = sprintf('%d steps, every span kept', nAll);
 end
 if minLen > 2
     n = groupcounts(S, 'trackId');

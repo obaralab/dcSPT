@@ -52,8 +52,12 @@ assert(strcmp(R(1).key,'c1') && strcmp(R(2).key,'c2'), 'and keep their keys');
 assert(R(1).nFrames == nPg/2 && R(2).nFrames == nPg/2, ...
     'each colour has half the pages (%d, %d of %d)', R(1).nFrames, R(2).nFrames, nPg);
 assert(R(1).nDets > 20 && R(2).nDets > 20, 'both colours should be detected (%d, %d)', R(1).nDets, R(2).nDets);
-assert(range(R(1).x)*px > 1.0, 'colour 1 should travel (range %.2f um)', range(R(1).x)*px);
-assert(range(R(2).x)*px < 0.5, 'colour 2 should sit still (range %.2f um)', range(R(2).x)*px);
+% Positions come back in MICRONS. The fixture puts colour 1's particle between x = 10 and 31 px at
+% 0.1 um/px, so anything near 10-31 would mean the detector's pixels leaked through unscaled.
+assert(max(R(1).x) < 0.9*size(imread(mv,1),2)*px, ...
+    'x must be in um, not pixels (max %.2f against a %.1f um field)', max(R(1).x), size(imread(mv,1),2)*px);
+assert(range(R(1).x) > 1.0, 'colour 1 should travel (range %.2f um)', range(R(1).x));
+assert(range(R(2).x) < 0.5, 'colour 2 should sit still (range %.2f um)', range(R(2).x));
 assert(min(R(2).x) > max(R(1).x), ...
     'the two colours occupy different parts of the frame; neither should pick up the other');
 assert(R(1).nTracks >= 1 && R(2).nTracks >= 1, 'each colour should link into at least one track');
@@ -76,7 +80,9 @@ cl2 = onCleanup(closeStack);
 i1 = find(R(1).frame == 5, 1);
 pg = R(1).page(i1);
 raw = double(readPage(pg));
-assert(raw(round(R(1).y(i1)), round(R(1).x(i1))) > 1000, ...
+% R.x/R.y are MICRONS, so they divide by the pixel size to index the raw frame. If this ever reads
+% the array directly again, positions have silently gone back to detector pixels.
+assert(raw(round(R(1).y(i1)/px), round(R(1).x(i1)/px)) > 1000, ...
     'the detection at frame 5 should be bright on page %d, the page it says it came from', pg);
 clear cl2
 
