@@ -56,12 +56,20 @@ function R = dc_comotion(S, opts)
 %                      linker swap, and because with two species it is the question being asked.
 %                      "all" restores both and fills the 'same' rows of .bins.
 %   .rMaxUm   3      ignore pairs further apart than this at that step (keeps the pair count sane)
+%   .nearUm   []     the cutoff that defines "nearby". Only pairs whose median separation is within
+%                    it get a row in R.pairs — those are the measurement. Steps at every separation
+%                    up to rMaxUm are still kept in R.steps, because the far ones are what the null
+%                    is built from and what says how many steps a correlation needs. Empty keeps
+%                    every pair, which is the old behaviour and rarely what you want: a list of 939
+%                    pairs where 900 are metres apart is not a list of candidates.
 %   .nMin     20     a pair needs this many shared steps to get a row in R.pairs
 %   .edgesUm  []     separation bin edges; default 0:0.1:1, then 1.25:0.25:2, then 2.5, 3
 %   .maxPairs 5e6    guard: stop and say so rather than filling memory
 %
 % OUTPUT R
-%   .steps   table, one row per simultaneous step pair: trackA trackB chA chB tp r dot cos
+%   .steps   table, one row per simultaneous step pair: trackA trackB chA chB tp r dot cos, the two
+%            positions the steps started from (xa ya xb yb, um) and the two step vectors
+%            (uax uay ubx uby, um) — enough to draw the pair as a quiver without another lookup
 %   .bins    table, one row per separation bin: rMid n meanCos seCos meanDot corrNorm, per class
 %   .pairs   table, one row per pair with >= nMin shared steps: trackA trackB class n rMedian
 %            meanCos seCos z meanDot corrNorm
@@ -75,6 +83,7 @@ if nargin < 2 || ~isstruct(opts), opts = struct(); end
 rMax  = getf(opts,'rMaxUm', 3);
 cls0  = string(getf(opts,'classes', "cross"));
 nMin  = getf(opts,'nMin', 20);
+nearUm = getf(opts,'nearUm', []);
 maxP  = getf(opts,'maxPairs', 5e6);
 edges = getf(opts,'edgesUm', [0:0.1:1, 1.25:0.25:2, 2.5, 3]);
 edges = unique([edges(:)' rMax]);
@@ -96,6 +105,7 @@ assert(est <= maxP, 'dc_comotion:tooManyPairs', ...
 
 A = zeros(0,1); B = zeros(0,1); TP = zeros(0,1); RR = zeros(0,1); DT = zeros(0,1); CS = zeros(0,1);
 uA = zeros(0,2); uB = zeros(0,2);
+pA = zeros(0,2); pB = zeros(0,2);        % where each step STARTED, so a quiver needs no lookup
 for k = 1:numel(tps)
     idx = find(g == k);
     m = numel(idx);
@@ -115,6 +125,7 @@ for k = 1:numel(tps)
     A = [A; S.trackId(a)]; B = [B; S.trackId(b)]; %#ok<AGROW>
     TP = [TP; repmat(tps(k), numel(a), 1)]; RR = [RR; r]; DT = [DT; d]; CS = [CS; c]; %#ok<AGROW>
     uA = [uA; ua]; uB = [uB; ub]; %#ok<AGROW>
+    pA = [pA; S.x(a) S.y(a)]; pB = [pB; S.x(b) S.y(b)]; %#ok<AGROW>
 end
 
 [uid, iu] = unique(S.trackId);                 % one row per track, not one per step
@@ -134,14 +145,16 @@ if cls0 ~= "all"
         cls0, numel(A), cls(1));
     A=A(keepC); B=B(keepC); chA=chA(keepC); chB=chB(keepC); cls=cls(keepC);
     TP=TP(keepC); RR=RR(keepC); DT=DT(keepC); CS=CS(keepC); uA=uA(keepC,:); uB=uB(keepC,:);
+    pA=pA(keepC,:); pB=pB(keepC,:);
 end
 
 % The step VECTORS are kept, not just the products: the time-shifted null in dc_comotion_null needs
 % to pair A's step with B's from another moment, which cannot be recovered from a cosine.
-R.steps = table(A, B, chA, chB, cls, TP, RR, DT, CS, uA(:,1), uA(:,2), uB(:,1), uB(:,2), ...
+R.steps = table(A, B, chA, chB, cls, TP, RR, DT, CS, ...
+    pA(:,1), pA(:,2), pB(:,1), pB(:,2), uA(:,1), uA(:,2), uB(:,1), uB(:,2), ...
     'VariableNames', {'trackA','trackB','chA','chB','class','tp','r','dot','cos', ...
-                      'uax','uay','ubx','uby'});
-R.params = struct('rMaxUm',rMax, 'nMin',nMin, 'edgesUm',edges, 'classes',cls0, ...
+                      'xa','ya','xb','yb','uax','uay','ubx','uby'});
+R.params = struct('rMaxUm',rMax, 'nMin',nMin, 'nearUm',nearUm, 'edgesUm',edges, 'classes',cls0, ...
                   'nSteps',height(S), 'nTracks',numel(unique(S.trackId)), 'nStepPairs',numel(A));
 
 % ---- the curve: every step, binned by separation ------------------------------------------------
@@ -174,7 +187,11 @@ first = accumarray(ic, (1:numel(ic))', [], @min);
 se = sC ./ sqrt(max(n,1));
 R.pairs = table(floor(uk/1e7), mod(uk,1e7), R.steps.class(first), n, mR, mC, se, mC./max(se,eps), mD, cn, ...
     'VariableNames', {'trackA','trackB','class','n','rMedian','meanCos','seCos','z','meanDot','corrNorm'});
+if ~isempty(nearUm)
+    sel = sel & (mR <= nearUm);        % the measurement is the NEAR pairs; the far ones are the null
+end
 R.pairs = sortrows(R.pairs(sel,:), 'z', 'descend');
+R.nearUm = nearUm;
 end
 
 % =================================================================================================

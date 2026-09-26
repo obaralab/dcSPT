@@ -18,7 +18,9 @@ function dc_app_smoke()
 %      (a spot's timepoint and page are the channel map's; a track id belongs to one colour) held.
 %   5. CO-MOTION RUNS CROSS-COLOUR ONLY and finds the pairs that were built to co-move.
 %   6. THE PAIR PANEL DRAWS INTO THE TAB rather than a new window, and moves with prev/next.
-%   7. EVERY BUTTON GOES THROUGH THE API. The test calls only H.api, so if a callback ever does its
+%   7. MANY CELLS, ONE AT A TIME. A second cell can be added, selected, and its own results kept
+%      separate — settings are shared, results and the pooled quality are not.
+%   8. EVERY BUTTON GOES THROUGH THE API. The test calls only H.api, so if a callback ever does its
 %      own work instead of delegating, this stops testing the app and the count below catches it.
 %
 % Headless: every figure is built with 'visible','off'.
@@ -159,6 +161,11 @@ assert(St.R.class == "cross" && all(St.R.steps.class == "cross"), ...
 assert(all(St.R.steps.chA ~= St.R.steps.chB), 'and every pair must span the two colours');
 assert(~isempty(St.N) && isfinite(St.N.k.fitted), 'the null should have been built');
 assert(height(St.R.pairs) >= 1, 'the fixture has a co-moving cross-colour pair; none was found');
+nPairs = height(St.R.pairs);
+% the pair list is the NEAR pairs only: the measurement, not everything that coexisted
+assert(all(St.R.pairs.rMedian <= H.api.coParams().rNearUm + 1e-9), ...
+    'every listed pair must be within the near cutoff (max %.2f um against %.2f)', ...
+    max(St.R.pairs.rMedian), H.api.coParams().rNearUm);
 fprintf('(5) %d cross pairs, far field %+.4f, SE = %.3f/sqrt(n)\n', ...
     height(St.R.pairs), St.N.far.meanCos, St.N.k.fitted);
 
@@ -192,10 +199,30 @@ assert(contains(errMsg,'rMaxUm'), ...
     'and the message must name rMaxUm as the thing to raise: "%s"', errMsg);
 fprintf('    empty far-field shell refused, message names rMaxUm\n');
 
-%% (7) the buttons delegate ---------------------------------------------------------------------------
+%% (7) a second cell -------------------------------------------------------------------------------
+tmp2 = [tmp '_b'];
+if isfolder(tmp2), rmdir(tmp2,'s'); end
+mkdir(tmp2); c2 = onCleanup(@() rmdir(tmp2,'s'));
+writeMovie(tmp2, 40, px);                 % a shorter second cell, so the two are distinguishable
+H.api.addCell(tmp2);
+H.api.selectCell(2);
+cl = H.api.cells();
+assert(numel(cl) == 2, 'two cells, got %d', numel(cl));
+assert(cl(2).C(1).nFrames == 40 && cl(1).C(1).nFrames == 60, ...
+    'each cell keeps its own channel map (%d and %d frames)', cl(1).C(1).nFrames, cl(2).C(1).nFrames);
+assert(~isempty(cl(1).R) && isempty(cl(2).R), ...
+    'the first cell keeps its co-motion result and the second has none yet');
+% switching back must restore the first cell's results rather than the second's empty ones
+H.api.selectCell(1);
+assert(~isempty(H.api.state().R), 'selecting the first cell again must restore its result');
+assert(height(H.api.state().R.pairs) == nPairs, 'and the same pairs (%d)', nPairs);
+fprintf('(7) two cells: %d and %d frames, results kept apart\n', ...
+    cl(1).C(1).nFrames, cl(2).C(1).nFrames);
+
+%% (8) the buttons delegate ---------------------------------------------------------------------------
 assert(all(isfield(H.api, {'loadFolder','detectPreview','runTracking','runComotion','showPair'})), ...
     'the api must expose every action a button performs');
-fprintf('(7) api exposes %d actions\n', numel(fieldnames(H.api)));
+fprintf('(8) api exposes %d actions\n', numel(fieldnames(H.api)));
 
 fprintf('\nDC-APP SMOKE PASSED.\n');
 end

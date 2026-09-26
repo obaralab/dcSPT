@@ -37,6 +37,13 @@ addpath(fullfile(root,'core'), fullfile(root,'drivers'));
 St = struct('folder','', 'stacks',{{}}, 'C',[], 'D',[], 'Draw',[], 'R',[], 'N',[], 'S',[], ...
             'rejected',[], 'nDropped',0, ...
             'pxUm',0.0967821, 'dtS',NaN, 'pxSrc','default', 'dtSrc','default', 'align',[]);
+% MANY CELLS, ONE AT A TIME. Each row of `cells` is a folder holding one cell's two colour stacks,
+% with whatever has been computed for it so far. Settings are shared, results are per cell, and the
+% pooled quality is too — a percentile of another cell's candidate distribution is not this cell's
+% threshold. `iCell` says which one the tabs are showing.
+cells = struct('folder',{}, 'name',{}, 'stacks',{}, 'C',[], 'D',[], 'Draw',[], 'R',[], 'N',[], ...
+               'pool',{}, 'thr',[], 'rejected',[], 'pxUm',[], 'dtS',[], 'align',[], 'status',{});
+iCell = 0;
 % Thresholding follows SPTinMatlab: pool the DoG candidate qualities over sampled frames, then cut
 % at a top percentile of THAT distribution. The histogram is the control; the number is read off it.
 prm = struct('diamUm',0.4, 'thr',[10 10], 'thrMode','pct', 'topPct',[2 2], ...
@@ -87,27 +94,195 @@ H.api = struct('loadFolder',@loadFolder, 'detectPreview',@detectPreview, ...
                'showPair',@showPair, 'state',@getState, 'params',@getParams, 'coParams',@getCo, ...
                'setParam',@setParam, 'setCo',@setCo, 'export',@onExport, ...
                'poolQuality',@poolQuality, 'showFrame',@showTrackFrame, 'curate',@curateTrack, ...
-               'pool',@getPool);
+               'pool',@getPool, 'addCell',@addCell, 'selectCell',@selectCell, ...
+               'cells',@getCells, 'runAll',@onRunAll);
 
 if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
 
 % ================================ tab 1: cells ====================================================
     function buildCells(parent)
-        g = uigridlayout(parent,[3 1],'RowHeight',{92,'1x',120},'Padding',[10 10 10 10],'RowSpacing',8);
-        hp = uigridlayout(g,[2 1],'RowHeight',{24,'1x'},'Padding',[0 0 0 0],'RowSpacing',4);
-        uilabel(hp,'Text','The stacks, and what the acquisition says each page is','FontWeight','bold');
-        lblFolder = uilabel(hp,'Text','No folder chosen. Use Folder… above, or drop a folder holding two colour stacks.', ...
-            'FontColor',[0.45 0.45 0.5],'WordWrap','on');
+        % The cell list, in the shape SPTinMatlab's Experiment tab has: everything the project holds,
+        % what stage each one has reached, and which is selected. Settings are shared across cells;
+        % results are not, and neither is the pooled quality — a percentile of another cell's
+        % candidate distribution is not this cell's threshold.
+        g = uigridlayout(parent,[4 1],'RowHeight',{28,'1x',76,26},'Padding',[10 10 10 10],'RowSpacing',7);
 
-        tblCh = uitable(g,'ColumnName',{'colour','stack','pages','frames','timepoints','dt (s)','source'}, ...
-            'ColumnWidth',{62,'auto',70,70,110,84,90},'RowName',{});
+        hr = uigridlayout(g,[1 6],'ColumnWidth',{'1x',108,120,104,96,104},'Padding',[0 0 0 0],'ColumnSpacing',6);
+        lblProj = uilabel(hr,'Text','No cells yet. Add one folder per cell, or scan a parent folder.', ...
+            'FontColor',[0.45 0.45 0.5]);
+        uibutton(hr,'Text','Add cell…','ButtonPushedFcn',@(s,e) onAddCell());
+        uibutton(hr,'Text','Scan folder…','Tooltip', ...
+            'Add every subfolder that holds two TIFF stacks, as one cell each.', ...
+            'ButtonPushedFcn',@(s,e) onScan());
+        uibutton(hr,'Text','Remove','ButtonPushedFcn',@(s,e) onRemoveCell());
+        uibutton(hr,'Text','Run all','FontWeight','bold','Tooltip', ...
+            'Pool, detect, track and run co-motion on every cell with the current settings.', ...
+            'ButtonPushedFcn',@(s,e) onRunAll());
+        uibutton(hr,'Text','Export all…','ButtonPushedFcn',@(s,e) onExportAll());
 
-        ap = uigridlayout(g,[2 1],'RowHeight',{22,'1x'},'Padding',[0 0 0 0],'RowSpacing',4);
-        uilabel(ap,'Text','How the two colours line up','FontWeight','bold');
+        tblCells = uitable(g,'ColumnName',{'cell','colours','frames','tracks','pairs','status'}, ...
+            'ColumnWidth',{'auto',80,72,72,64,140},'RowName',{}, ...
+            'SelectionType','row', 'CellSelectionCallback',@(s,e) onPickCell(e));
+
+        ap = uigridlayout(g,[2 1],'RowHeight',{20,'1x'},'Padding',[0 0 0 0],'RowSpacing',3);
+        uilabel(ap,'Text','The selected cell: what each page is, and how the two colours line up', ...
+            'FontWeight','bold');
         lblAlign = uilabel(ap,'Text','—','WordWrap','on','FontColor',[0.2 0.2 0.25]);
 
-        cellsCtl = struct('folder',lblFolder,'tbl',tblCh,'align',lblAlign);
-        setappdata(fig,'cells',cellsCtl);
+        tblCh = uitable(g,'ColumnName',{'colour','stack','pages','frames','timepoints','dt (s)','source'}, ...
+            'ColumnWidth',{62,'auto',64,64,96,80,88},'RowName',{});
+
+        setappdata(fig,'cells', struct('tbl',tblCells,'ch',tblCh,'align',lblAlign,'proj',lblProj));
+    end
+
+    function onAddCell()
+        f = uigetdir(tern(isempty(St.folder), pwd, fileparts(St.folder)), ...
+            'Folder holding ONE cell''s two colour stacks');
+        if isequal(f,0), return; end
+        addCell(f); refreshCells(); selectCell(numel(cells));
+    end
+
+    function onScan()
+        root = uigetdir(pwd, 'Parent folder — every subfolder with two stacks becomes a cell');
+        if isequal(root,0), return; end
+        d = dir(root); d = d([d.isdir] & ~startsWith({d.name},'.'));
+        n0 = numel(cells);
+        for k = 1:numel(d)
+            p = fullfile(root, d(k).name);
+            if numel([dir(fullfile(p,'*.tif')); dir(fullfile(p,'*.tiff'))]) >= 2, addCell(p); end
+        end
+        if numel([dir(fullfile(root,'*.tif')); dir(fullfile(root,'*.tiff'))]) >= 2, addCell(root); end
+        refreshCells();
+        say('scan added %d cell(s)', numel(cells) - n0);
+        if numel(cells) > n0, selectCell(n0 + 1); end
+    end
+
+    function addCell(folder)
+        if any(strcmp({cells.folder}, folder)), return; end     % adding twice is always a slip
+        [~, nm] = fileparts(folder);
+        cells(end+1) = struct('folder',folder, 'name',nm, 'stacks',{{}}, 'C',[], 'D',[], 'Draw',[], ...
+            'R',[], 'N',[], 'pool',{{[] []}}, 'thr',prm.thr, 'rejected',[], ...
+            'pxUm',[], 'dtS',[], 'align',[], 'status','added');
+    end
+
+    function onRemoveCell()
+        c = getappdata(fig,'cells');
+        k = c.tbl.Selection;
+        if isempty(k), return; end
+        cells(k(1)) = [];
+        if iCell > numel(cells), iCell = numel(cells); end
+        refreshCells();
+        if iCell >= 1, selectCell(iCell); end
+    end
+
+    function onPickCell(e)
+        if isempty(e.Indices), return; end
+        selectCell(e.Indices(1));
+    end
+
+    function selectCell(k)
+        if k < 1 || k > numel(cells), return; end
+        stash();                       % keep what the outgoing cell has computed
+        iCell = k;
+        c = cells(k);
+        St.folder = c.folder; St.stacks = c.stacks; St.C = c.C;
+        St.D = c.D; St.Draw = c.Draw; St.R = c.R; St.N = c.N;
+        St.rejected = c.rejected; St.align = c.align;
+        if ~isempty(c.pxUm), St.pxUm = c.pxUm; end
+        if ~isempty(c.dtS),  St.dtS  = c.dtS;  end
+        pool = c.pool; prm.thr = c.thr;
+        if isempty(St.C), loadFolder(c.folder); end
+        refreshCells(); showChannels();
+        eCalPx.Value = St.pxUm;
+        if isfinite(St.dtS), eCalDt.Value = St.dtS; end
+        detectPreview();
+        if ~isempty(St.D), showTrackFrame(1); end
+    end
+
+    function stash()
+        if iCell < 1 || iCell > numel(cells), return; end
+        cells(iCell).stacks = St.stacks; cells(iCell).C = St.C;
+        cells(iCell).D = St.D; cells(iCell).Draw = St.Draw;
+        cells(iCell).R = St.R; cells(iCell).N = St.N;
+        cells(iCell).rejected = St.rejected; cells(iCell).align = St.align;
+        cells(iCell).pxUm = St.pxUm; cells(iCell).dtS = St.dtS;
+        cells(iCell).pool = pool; cells(iCell).thr = prm.thr;
+        cells(iCell).status = stageOf(iCell);
+    end
+
+    function s2 = stageOf(k)
+        c = cells(k); s2 = 'added';
+        if ~isempty(c.C), s2 = 'read'; end
+        if ~isempty(c.pool) && ~isempty(c.pool{1}), s2 = 'pooled'; end
+        if ~isempty(c.D), s2 = 'tracked'; end
+        if ~isempty(c.R), s2 = 'co-motion'; end
+    end
+
+    function refreshCells()
+        c = getappdata(fig,'cells');
+        if isempty(c) || ~isgraphics(c.tbl), return; end
+        stash();
+        rows = cell(numel(cells), 6);
+        for k = 1:numel(cells)
+            q = cells(k);
+            nCol = numel(q.C);
+            nFr = ''; if ~isempty(q.C), nFr = sprintf('%d', q.C(1).nFrames); end
+            nTr = ''; if ~isempty(q.D)
+                nTr = sprintf('%d', numel(unique(q.D.spots.trackId(isfinite(q.D.spots.trackId))))); end
+            nPr = ''; if ~isempty(q.R), nPr = sprintf('%d', height(q.R.pairs)); end
+            rows(k,:) = {q.name, sprintf('%d', nCol), nFr, nTr, nPr, stageOf(k)};
+        end
+        c.tbl.Data = rows;
+        if iCell >= 1 && iCell <= numel(cells), c.tbl.Selection = iCell; end
+        c.proj.Text = sprintf('%d cell(s); settings are shared, results and pooled quality are per cell', ...
+            numel(cells));
+    end
+
+    function showChannels()
+        c = getappdata(fig,'cells');
+        if isempty(St.C), c.ch.Data = {}; c.align.Text = '—'; return; end
+        rows = cell(numel(St.C), 7);
+        for i = 1:numel(St.C)
+            [~,nm,ex] = fileparts(St.stacks{i});
+            rows(i,:) = {St.C(i).key, [nm ex], sprintf('%d', numel(St.C(i).pages)), ...
+                sprintf('%d', St.C(i).nFrames), ...
+                sprintf('%d–%d', min(St.C(i).tp), max(St.C(i).tp)), ...
+                sprintf('%.6g', St.C(i).dt_s), 'slice labels'};
+        end
+        c.ch.Data = rows;
+        if ~isempty(St.align), c.align.Text = St.align.text; end
+    end
+
+    function onRunAll()
+        assert(~isempty(cells), 'dc_app:noCells', 'add at least one cell');
+        for k = 1:numel(cells)
+            selectCell(k);
+            say('=== %s (%d of %d) ===', cells(k).name, k, numel(cells));
+            try
+                poolQuality(); runTracking(); runComotion();
+            catch ME
+                say('  %s failed: %s', cells(k).name, ME.message);
+            end
+            stash();
+        end
+        refreshCells();
+        say('run all finished over %d cell(s)', numel(cells));
+    end
+
+    function onExportAll()
+        if isempty(cells), return; end
+        f = uigetdir(pwd, 'Where to write one folder per cell');
+        if isequal(f,0), return; end
+        n = 0;
+        for k = 1:numel(cells)
+            if isempty(cells(k).R), continue; end
+            d = fullfile(f, cells(k).name); if ~isfolder(d), mkdir(d); end
+            writetable(cells(k).R.pairs, fullfile(d,'dc_comotion_pairs.csv'));
+            writetable(cells(k).R.bins,  fullfile(d,'dc_comotion_bins.csv'));
+            if ~isempty(cells(k).N), writetable(cells(k).N.curve, fullfile(d,'dc_comotion_null.csv')); end
+            n = n + 1;
+        end
+        say('exported %d cell(s) to %s', n, f);
     end
 
 % ================================ tab 2: detect & track ===========================================
@@ -206,6 +381,7 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
     end
 
     function q = getPool(), q = pool; end
+    function c = getCells(), stash(); c = cells; end
 
     function poolQuality()
         assert(~isempty(St.C), 'dc_app:noCells', 'pick a folder first');
@@ -523,13 +699,108 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
 
 % ================================ tab 4: pair =====================================================
     function buildPair(parent)
-        g = uigridlayout(parent,[2 1],'RowHeight',{30,'1x'},'Padding',[8 8 8 8],'RowSpacing',6);
-        hr = uigridlayout(g,[1 4],'ColumnWidth',{300,90,90,'1x'},'Padding',[0 0 0 0],'ColumnSpacing',6);
+        % One cross-colour pair, two ways at once: over the raw composite on the left, with the step
+        % vectors as a quiver, and its traces on the right. The picture is what tells you whether a
+        % high cosine is two molecules travelling together or two unrelated ones that happened to
+        % drift the same way for a while — a number cannot distinguish those and a quiver can.
+        g = uigridlayout(parent,[3 1],'RowHeight',{30,26,'1x'},'Padding',[8 8 8 8],'RowSpacing',5);
+
+        hr = uigridlayout(g,[1 7],'ColumnWidth',{'1x',78,78,96,74,120,96},'Padding',[0 0 0 0],'ColumnSpacing',6);
         lblPair = uilabel(hr,'Text','Select a pair in the Co-motion tab.','FontColor',[0.35 0.35 0.4]);
         uibutton(hr,'Text','◀ prev','ButtonPushedFcn',@(s,e) stepPair(-1));
         uibutton(hr,'Text','next ▶','ButtonPushedFcn',@(s,e) stepPair(+1));
-        host = uipanel(g,'BorderType','none');
-        setappdata(fig,'pair', struct('host',host,'lbl',lblPair,'k',0));
+        uilabel(hr,'Text','Window (steps)','HorizontalAlignment','right');
+        spnWin = uieditfield(hr,'numeric','Value',40,'Limits',[4 1e4],'RoundFractionalValues',true, ...
+            'Tooltip','How many timepoints of the pair to draw around the slider position.', ...
+            'ValueChangedFcn',@(s,e) redrawPair());
+        chkQuiv = uicheckbox(hr,'Text','Quiver','Value',true, ...
+            'Tooltip','Draw each step as an arrow from where the molecule was. This is the co-motion itself.', ...
+            'ValueChangedFcn',@(s,e) redrawPair());
+        chkZoom = uicheckbox(hr,'Text','Zoom to pair','Value',true, ...
+            'ValueChangedFcn',@(s,e) redrawPair());
+
+        sr = uigridlayout(g,[1 2],'ColumnWidth',{'1x',150},'Padding',[0 0 0 0],'ColumnSpacing',6);
+        sldP = uislider(sr,'Limits',[1 100],'Value',1,'MajorTicks',[], ...
+            'ValueChangingFcn',@(s,e) onPairSlide(e.Value));
+        lblTp = uilabel(sr,'Text','—','FontName','Menlo','FontSize',11);
+
+        mn = uigridlayout(g,[1 2],'ColumnWidth',{'1.05x','1x'},'Padding',[0 0 0 0],'ColumnSpacing',8);
+        pnl = uipanel(mn,'BorderType','none');          % see the Track tab: keeps the aspect in its box
+        axP = uiaxes(pnl); axP.Units='normalized'; axP.Position=[0.06 0.07 0.90 0.86];
+        host = uipanel(mn,'BorderType','none');
+
+        setappdata(fig,'pair', struct('host',host,'ax',axP,'lbl',lblPair,'k',0,'tp',1, ...
+            'win',spnWin,'quiv',chkQuiv,'zoom',chkZoom,'sld',sldP,'tpLbl',lblTp));
+    end
+
+    function onPairSlide(v)
+        pp = getappdata(fig,'pair'); pp.tp = round(v); setappdata(fig,'pair',pp);
+        drawPairImage();
+    end
+    function redrawPair()
+        drawPairImage();
+    end
+
+    function drawPairImage()
+        pp = getappdata(fig,'pair');
+        if isempty(St.R) || pp.k < 1 || pp.k > height(St.R.pairs) || ~isgraphics(pp.ax), return; end
+        row = St.R.pairs(pp.k,:);
+        idA = row.trackA; idB = row.trackB;
+
+        st = St.R.steps(St.R.steps.trackA == idA & St.R.steps.trackB == idB, :);
+        if isempty(st), return; end
+        st = sortrows(st,'tp');
+        tps = st.tp;
+        tpNow = min(max(pp.tp, min(tps)), max(tps));
+        w = pp.win.Value;
+        inWin = tps >= tpNow - w/2 & tps <= tpNow + w/2;
+        sw = st(inWin,:);
+
+        pgA = pageFor(1, tpNow); pgB = pageFor(2, tpNow);
+        if isempty(pgA) || isempty(pgB), return; end
+        A = double(imread(St.stacks{1}, pgA));
+        B = double(imread(St.stacks{2}, pgB));
+        rgb = dc_composite(A, B, struct('gamma',0.7));
+
+        cla(pp.ax);
+        image(pp.ax, rgb);
+        set(pp.ax,'DataAspectRatio',[1 1 1],'YDir','reverse', ...
+                  'XLim',[0.5 size(rgb,2)+0.5], 'YLim',[0.5 size(rgb,1)+0.5]);
+        hold(pp.ax,'on');
+
+        px = St.pxUm;
+        hp = dc_draw(pp.ax, 'pair', St.D, idA, idB, tpNow, ...
+            struct('pxUm',px, 'rPx',(prm.diamUm/px)/2, 'tail',w));
+
+        if pp.quiv.Value && ~isempty(sw)
+            % The step vectors themselves, as arrows from where each molecule was. Two arrow fields
+            % pointing the same way IS the correlation the cosine summarises; drawn together they
+            % also show WHEN it held, which a single number over the whole pair cannot.
+            % Scale 0 and AutoScale off: the arrows are the real displacements, in the image's own
+            % units. MATLAB's default autoscaling would resize them to look tidy, which would make
+            % two arrows of very different length appear comparable — the opposite of the point.
+            quiver(pp.ax, sw.xa/px, sw.ya/px, sw.uax/px, sw.uay/px, 0, ...
+                'Color',[1 0.45 1], 'LineWidth',0.9, 'MaxHeadSize',0.5);
+            quiver(pp.ax, sw.xb/px, sw.yb/px, sw.ubx/px, sw.uby/px, 0, ...
+                'Color',[0.45 1 0.5], 'LineWidth',0.9, 'MaxHeadSize',0.5);
+        end
+        hold(pp.ax,'off');
+
+        if pp.zoom.Value
+            pad = 1.2 / px;               % 1.2 µm of context around the pair's excursion
+            xs = [sw.xa; sw.xb; sw.xa+sw.uax; sw.xb+sw.ubx]/px;
+            ys = [sw.ya; sw.yb; sw.ya+sw.uay; sw.yb+sw.uby]/px;
+            if ~isempty(xs)
+                xlim(pp.ax, [min(xs)-pad, max(xs)+pad]);
+                ylim(pp.ax, [min(ys)-pad, max(ys)+pad]);
+            end
+        end
+        if isgraphics(pp.sld), pp.sld.Limits = [min(tps) max(tps)]; pp.sld.Value = tpNow; end
+        pp.tp = tpNow; setappdata(fig,'pair',pp);
+        sep = ''; if isfinite(hp.rNm), sep = sprintf(', %.0f nm apart', hp.rNm); end
+        pp.tpLbl.Text = sprintf('tp %d%s', tpNow, sep);
+        title(pp.ax, sprintf('tracks %g (magenta) and %g (green) — %d steps in view%s', ...
+            idA, idB, height(sw), sep));
     end
 
 % ================================ actions =========================================================
@@ -542,7 +813,6 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
         St.stacks = arrayfun(@(q) fullfile(q.folder,q.name), d(1:2), 'uni', 0);
 
         specs = struct('key',{},'label',{},'pages',{},'tp',{},'dt_s',{});
-        rows = {};
         dtAll = [];
         for i = 1:2
             p = St.stacks{i};
@@ -566,21 +836,17 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
             catch, end
             dtAll(end+1) = dtp; %#ok<AGROW>
             specs(i) = struct('key',key,'label',key,'pages',pages,'tp',tp,'dt_s',dtp);
-            [~,nm,ex] = fileparts(p);
-            % Counts as integers and dt to its real precision: a uitable renders a double as
-            % "60.0000", which reads as a measurement rather than a count.
-            rows(end+1,:) = {key, [nm ex], sprintf('%d', nPg), sprintf('%d', numel(pages)), ...
-                sprintf('%d–%d', min(tp), max(tp)), sprintf('%.6g', dtp), src}; %#ok<AGROW>
+
         end
         St.C = dc_channels('manual', specs);
         if any(isfinite(dtAll)), St.dtS = median(dtAll(isfinite(dtAll))); St.dtSrc = 'metadata'; end
 
-        c = getappdata(fig,'cells');
-        c.folder.Text = St.folder;
-        c.tbl.Data = rows;
         A = dc_align(St.C(1), St.C(2));
         St.align = A;
-        c.align.Text = A.text;
+        if iCell < 1
+            addCell(St.folder); iCell = numel(cells);
+        end
+        stash(); refreshCells(); showChannels();
         eCalPx.Value = St.pxUm;
         if isfinite(St.dtS), eCalDt.Value = St.dtS; end
         lblCal.Text = sprintf('%s / %s', St.pxSrc, St.dtSrc);
@@ -630,7 +896,11 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
         end
         if co.drift, [S, Dr] = dc_drift(S); sayCo('%s', Dr.text); end
         St.S = S;
-        R = dc_comotion(S, struct('rMaxUm',co.rMaxUm, 'nMin',co.nMin, 'classes',"cross"));
+        % nearUm is the measurement's cutoff: the pair list is the pairs that were close enough to
+        % be worth looking at. Steps at every separation are still collected, because the far ones
+        % are the null and the thing that says how many steps a correlation needs.
+        R = dc_comotion(S, struct('rMaxUm',co.rMaxUm, 'nMin',co.nMin, ...
+                                  'nearUm',co.rNearUm, 'classes',"cross"));
         St.R = R;
         % The null can legitimately refuse: too few distant pairs to build one from. That is a
         % statement about the movie, not a crash, so it belongs in the log next to the curve it
@@ -676,20 +946,27 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
         c.tbl.Data = [num2cell(P.trackA), num2cell(P.trackB), num2cell(P.n), ...
                       num2cell(round(P.rMedian*1000)), num2cell(round(P.meanCos,3)), ...
                       num2cell(round(P.z,2))];
-        c.lbl.Text = sprintf('%d cross-colour pairs with %d+ shared steps; %d step pairs in total', ...
-            height(P), co.nMin, height(R.steps));
+        c.lbl.Text = sprintf(['%d cross-colour pairs within %.2f µm with %d+ shared steps — click one ' ...
+            'to open it. %d step pairs at every separation feed the null.'], ...
+            height(P), co.rNearUm, co.nMin, height(R.steps));
         if ~isempty(N), sayCo('%s', N.text); end
         if ~isempty(P), showPair(1); end
     end
 
     function showPair(k)
         if isempty(St.R) || isempty(St.R.pairs) || k < 1 || k > height(St.R.pairs), return; end
-        pp = getappdata(fig,'pair'); pp.k = k; setappdata(fig,'pair',pp);
+        pp = getappdata(fig,'pair'); pp.k = k;
+        st = St.R.steps(St.R.steps.trackA == St.R.pairs.trackA(k) & ...
+                        St.R.steps.trackB == St.R.pairs.trackB(k), :);
+        if ~isempty(st), pp.tp = round(median(st.tp)); end
+        setappdata(fig,'pair',pp);
         dtv = []; if isfinite(St.dtS), dtv = St.dtS; end
         Hp = dc_pair_panel(St.D, St.R, k, struct('parent',pp.host,'null',St.N,'dtS',dtv));
-        pp.lbl.Text = sprintf('pair %d of %d — tracks %g and %g, %d shared steps, cos %+.3f', ...
-            k, height(St.R.pairs), Hp.trackA, Hp.trackB, Hp.n, Hp.meanCos);
-        tg.SelectedTab = t4;
+        drawPairImage();
+        pp = getappdata(fig,'pair');
+        pp.lbl.Text = sprintf('pair %d of %d — tracks %g and %g, %d shared steps, cos %+.3f, %.0f nm apart', ...
+            k, height(St.R.pairs), Hp.trackA, Hp.trackB, Hp.n, Hp.meanCos, 1000*Hp.rMedian);
+        tg.SelectedTab = t5;      % the Pair tab — t4 is Co-motion since the Track tab arrived
     end
 
     function stepPair(d)
