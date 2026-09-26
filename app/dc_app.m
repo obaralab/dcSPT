@@ -34,7 +34,14 @@ root = fileparts(here);
 addpath(fullfile(root,'core'), fullfile(root,'drivers'));
 
 % ---- state ---------------------------------------------------------------------------------------
+% One open TIFF handle per colour, and one set of display limits per cell. imread(path,k) reopens
+% the file and walks its directory chain to page k every single call — measured at 52 ms a page on a
+% 6320-page stack, so 104 ms per frame before anything is drawn. Through a held handle the same read
+% is 0.6 ms. The display limits are cached for a second reason as well as speed: recomputing
+% percentiles per frame rescales the contrast to whatever is in that frame, so a molecule that
+% bleaches looks constant because the picture keeps adjusting to it.
 St = struct('folder','', 'stacks',{{}}, 'C',[], 'D',[], 'Draw',[], 'R',[], 'N',[], 'S',[], ...
+            'rd',{{}}, 'rdClose',{{}}, 'disp',[], 'prep',[], ...
             'rejected',[], 'nDropped',0, ...
             'pxUm',0.0967821, 'dtS',NaN, 'pxSrc','default', 'dtSrc','default', 'align',[]);
 % MANY CELLS, ONE AT A TIME. Each row of `cells` is a folder holding one cell's two colour stacks,
@@ -194,7 +201,7 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
         if ~isempty(c.pxUm), St.pxUm = c.pxUm; end
         if ~isempty(c.dtS),  St.dtS  = c.dtS;  end
         pool = c.pool; prm.thr = c.thr;
-        if isempty(St.C), loadFolder(c.folder); end
+        if isempty(St.C), loadFolder(c.folder); else, openReaders(); end
         refreshCells(); showChannels();
         eCalPx.Value = St.pxUm;
         if isfinite(St.dtS), eCalDt.Value = St.dtS; end
@@ -384,6 +391,7 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
     end
 
     function onClose()
+        closeReaders();
         for nm = {'track','pair'}
             d = getappdata(fig, nm{1});
             if isstruct(d) && isfield(d,'timer') && ~isempty(d.timer) && isvalid(d.timer)
@@ -391,6 +399,43 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
             end
         end
         delete(fig);
+    end
+
+    function openReaders()
+        closeReaders();
+        St.rd = cell(1,2); St.rdClose = cell(1,2);
+        for i = 1:2
+            [St.rd{i}, St.rdClose{i}] = dc_tiff_pages(St.stacks{i});
+        end
+        % Display limits from a sample of frames, then held: fixed across the movie so a change in
+        % brightness is a change in the data and not in the scaling.
+        loA=[]; hiA=[]; loB=[]; hiB=[];
+        ts = round(linspace(1, numel(St.C(1).pages), min(6, numel(St.C(1).pages))));
+        for t = ts
+            a = double(St.rd{1}(St.C(1).pages(t)));
+            b = double(St.rd{2}(St.C(2).pages(min(t, numel(St.C(2).pages)))));
+            loA(end+1) = prctile(a(:),50); hiA(end+1) = prctile(a(:),99.9); %#ok<AGROW>
+            loB(end+1) = prctile(b(:),50); hiB(end+1) = prctile(b(:),99.9); %#ok<AGROW>
+        end
+        St.disp = struct('loA',median(loA),'hiA',median(hiA), ...
+                         'loB',median(loB),'hiB',median(hiB));
+    end
+
+    function closeReaders()
+        for i = 1:numel(St.rdClose)
+            try, if ~isempty(St.rdClose{i}), St.rdClose{i}(); end, catch, end
+        end
+        St.rd = {}; St.rdClose = {};
+    end
+
+    function im = readPg(i, pg)
+        if numel(St.rd) >= i && ~isempty(St.rd{i}), im = double(St.rd{i}(pg));
+        else, im = double(imread(St.stacks{i}, pg)); end
+    end
+
+    function P = drawSrc()
+        if isempty(St.prep) && ~isempty(St.D), St.prep = dc_draw([], 'prep', St.D); end
+        P = St.prep; if isempty(P), P = St.D; end
     end
 
     function q = getPool(), q = pool; end
@@ -423,7 +468,7 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
         out = cell(1,2);
         for i = 1:2
             pg = St.C(i).pages(min(k, numel(St.C(i).pages)));
-            raw = double(imread(St.stacks{i}, pg));
+            raw = readPg(i, pg);
             thr = curThr(i);
             xy = dc_detect(raw, prm.diamUm, St.pxUm, thr, struct());
             out{i} = xy;
@@ -574,6 +619,7 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
         S.trackId(blank) = NaN; S.trackLocal(blank) = NaN;
         St.D.spots = S;
         St.nDropped = numel(drop);
+        St.prep = dc_draw([], 'prep', St.D);     % the draw-ready view, rebuilt only when D changes
     end
 
     function curateTrack(id)
@@ -609,8 +655,7 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
 
         pgA = pageFor(1, tp); pgB = pageFor(2, tp);
         if isempty(pgA) || isempty(pgB), return; end
-        A = double(imread(St.stacks{1}, pgA));
-        B = double(imread(St.stacks{2}, pgB));
+        A = readPg(1, pgA);  B = readPg(2, pgB);
         if t.paths.Value, tail = t.tail.Value; else, tail = 1; end
         px = St.pxUm; rPx = (prm.diamUm/px)/2;
         gam = t.gamma.Value;
@@ -619,29 +664,44 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
         if isempty(xl), xl = [0.5 size(A,2)+0.5]; yl = [0.5 size(A,1)+0.5]; end
         names = {sprintf('%s', chKey(1)), sprintf('%s', chKey(2)), 'merged'};
         nA = 0; nB = 0;
-        for i = 1:3
-            ax = t.ax(i); cla(ax);
-            switch i
-                case 1, im = gray3g(A, gam);
-                case 2, im = gray3g(B, gam);
-                case 3, im = dc_composite(A, B, struct('gamma', gam));
+        % Update in place rather than cla + image. Clearing an axes and building a new image and new
+        % line objects every frame is what makes a MATLAB player stutter: the pixels are the cheap
+        % part. The image handle is kept and its CData replaced; only the overlays, which genuinely
+        % change shape, are rebuilt — and there are four of them, not hundreds, because dc_draw puts
+        % every path in one NaN-separated line.
+        if ~isfield(t,'him') || numel(t.him) ~= 3 || ~all(isgraphics(t.him))
+            t.him = gobjects(1,3); t.hov = {[] [] []};
+            for i = 1:3
+                cla(t.ax(i));
+                t.him(i) = image(t.ax(i), zeros(size(A,1), size(A,2), 3));
+                set(t.ax(i),'DataAspectRatio',[1 1 1],'YDir','reverse');
+                title(t.ax(i), names{i}, 'FontSize', 9);
+                hold(t.ax(i),'on');
             end
-            image(ax, im);
-            set(ax,'DataAspectRatio',[1 1 1],'YDir','reverse','XLim',xl,'YLim',yl);
-            hold(ax,'on');
+        end
+        for i = 1:3
+            switch i
+                case 1, im = gray3f(A, gam, dispLim('A'));
+                case 2, im = gray3f(B, gam, dispLim('B'));
+                case 3, im = dc_composite(A, B, dispOpts(gam));
+            end
+            set(t.him(i), 'CData', im);
+            if ~isempty(t.hov{i}), delete(t.hov{i}(isgraphics(t.hov{i}))); end
+            h = gobjects(0);
             if i == 1 || i == 3
-                hA = dc_draw(ax,'tracks',St.D,tp,struct('ch',chKey(1),'colour',[1 0.45 1], ...
+                hA = dc_draw(t.ax(i),'tracks',drawSrc(),tp,struct('ch',chKey(1),'colour',[1 0.45 1], ...
                     'pxUm',px,'rPx',rPx,'tail',tail));
-                nA = hA.n;
+                nA = hA.n; h = [h hA.paths hA.now];
             end
             if i == 2 || i == 3
-                hB = dc_draw(ax,'tracks',St.D,tp,struct('ch',chKey(2),'colour',[0.45 1 0.5], ...
+                hB = dc_draw(t.ax(i),'tracks',drawSrc(),tp,struct('ch',chKey(2),'colour',[0.45 1 0.5], ...
                     'pxUm',px,'rPx',rPx,'tail',tail));
-                nB = hB.n;
+                nB = hB.n; h = [h hB.paths hB.now];
             end
-            hold(ax,'off');
-            title(ax, names{i}, 'FontSize', 9);
+            t.hov{i} = h(isgraphics(h));
+            set(t.ax(i), 'XLim', xl, 'YLim', yl);
         end
+        setappdata(fig,'track',t);
         if isgraphics(t.sld), t.sld.Limits = [1 max(nTp,2)]; t.sld.Value = tp; end
         nDrop = 0; if isfield(St,'nDropped'), nDrop = St.nDropped; end
         t.lbl.Text = sprintf(['timepoint %d of %d · %d %s tracks and %d %s tracks visible · %d ' ...
@@ -664,7 +724,7 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
             stop(t.timer); delete(t.timer); t.timer = [];
             t.play.Text = '▶ Play'; setappdata(fig,'track',t); return
         end
-        t.timer = timer('ExecutionMode','fixedSpacing','Period',0.08,'TimerFcn',@(~,~) tick());
+        t.timer = timer('ExecutionMode','fixedSpacing','Period',0.080,'TimerFcn',@(~,~) tick());
         t.play.Text = '❚❚ Pause'; setappdata(fig,'track',t); start(t.timer);
     end
     function tick()
@@ -808,8 +868,10 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
             stop(pp.timer); delete(pp.timer); pp.timer = [];
             pp.play.Text = '▶ Play'; setappdata(fig,'pair',pp); return
         end
-        pp.timer = timer('ExecutionMode','fixedSpacing','Period',max(1/pp.fps.Value,0.03), ...
-                         'TimerFcn',@(~,~) pairTick());
+        % Rounded to the millisecond: timer refuses finer precision and warns on every construction,
+        % and 1/12 of a second is not a whole number of them.
+        per = round(max(1/pp.fps.Value, 0.03), 3);
+        pp.timer = timer('ExecutionMode','fixedSpacing','Period',per, 'TimerFcn',@(~,~) pairTick());
         pp.play.Text = '❚❚ Pause'; setappdata(fig,'pair',pp); start(pp.timer);
     end
     function pairTick()
@@ -847,8 +909,7 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
 
         pgA = pageFor(1, tpNow); pgB = pageFor(2, tpNow);
         if isempty(pgA) || isempty(pgB), return; end
-        A = double(imread(St.stacks{1}, pgA));
-        B = double(imread(St.stacks{2}, pgB));
+        A = readPg(1, pgA);  B = readPg(2, pgB);
         px = St.pxUm; rPx = (prm.diamUm/px)/2;
 
         % the box the three panels share, so they are comparable at a glance
@@ -864,23 +925,23 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
         for i = 1:3
             ax = pp.ax(i); cla(ax);
             switch i
-                case 1, im = gray3(A);                       % each colour in GREY on its own:
-                case 2, im = gray3(B);                       % judging a spot should not fight a hue
-                case 3, im = dc_composite(A, B, struct('gamma',0.8));
+                case 1, im = gray3f(A, 0.8, dispLim('A'));    % each colour in GREY on its own:
+                case 2, im = gray3f(B, 0.8, dispLim('B'));    % judging a spot should not fight a hue
+                case 3, im = dc_composite(A, B, dispOpts(0.8));
             end
             image(ax, im);
             set(ax,'DataAspectRatio',[1 1 1],'YDir','reverse','XLim',xl,'YLim',yl);
             hold(ax,'on');
             if i == 1 || i == 3
-                dc_draw(ax,'tracks',St.D,tpNow,struct('ch',chKey(1),'colour',cols{1}, ...
+                dc_draw(ax,'tracks',drawSrc(),tpNow,struct('ch',chKey(1),'colour',cols{1}, ...
                     'pxUm',px,'rPx',rPx,'tail',w,'tracks',idA));
             end
             if i == 2 || i == 3
-                dc_draw(ax,'tracks',St.D,tpNow,struct('ch',chKey(2),'colour',cols{2}, ...
+                dc_draw(ax,'tracks',drawSrc(),tpNow,struct('ch',chKey(2),'colour',cols{2}, ...
                     'pxUm',px,'rPx',rPx,'tail',w,'tracks',idB));
             end
             if i == 3
-                hp = dc_draw(ax,'pair',St.D,idA,idB,tpNow, ...
+                hp = dc_draw(ax,'pair',drawSrc(),idA,idB,tpNow, ...
                     struct('pxUm',px,'rPx',rPx,'tail',w));
                 if pp.quiv.Value && ~isempty(sw)
                     % Scale 0, autoscale off: the arrows are the real displacements in the image's
@@ -909,17 +970,23 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
         pp.tpLbl.Text = sprintf('tp %d · %.0f nm', tpNow, rNow);
     end
 
-    function g3 = gray3g(X, gam)
-        lo = prctile(X(:),50); hi = prctile(X(:),99.9);
-        if ~(hi>lo), hi = lo+1; end
-        y = min(max((X-lo)/(hi-lo),0),1) .^ gam;
-        g3 = cat(3,y,y,y);
+    function o = dispOpts(gam)
+        o = struct('gamma', gam);
+        if ~isempty(St.disp)
+            o.loA = St.disp.loA; o.hiA = St.disp.hiA;
+            o.loB = St.disp.loB; o.hiB = St.disp.hiB;
+        end
     end
-
-    function g3 = gray3(X)
-        lo = prctile(X(:),50); hi = prctile(X(:),99.9);
-        if ~(hi>lo), hi = lo+1; end
-        y = min(max((X-lo)/(hi-lo),0),1) .^ 0.8;
+    function lh = dispLim(which)
+        lh = [];
+        if isempty(St.disp), return; end
+        if which == 'A', lh = [St.disp.loA St.disp.hiA]; else, lh = [St.disp.loB St.disp.hiB]; end
+    end
+    function g3 = gray3f(X, gam, lh)
+        % Fixed limits when the cell has them, so brightness on screen tracks brightness in the data.
+        if isempty(lh), lh = [prctile(X(:),50) prctile(X(:),99.9)]; end
+        lo = lh(1); hi = lh(2); if ~(hi>lo), hi = lo+1; end
+        y = min(max((X-lo)/(hi-lo),0),1) .^ gam;
         g3 = cat(3,y,y,y);
     end
 
@@ -961,6 +1028,7 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
         St.C = dc_channels('manual', specs);
         if any(isfinite(dtAll)), St.dtS = median(dtAll(isfinite(dtAll))); St.dtSrc = 'metadata'; end
 
+        openReaders();
         A = dc_align(St.C(1), St.C(2));
         St.align = A;
         if iCell < 1
