@@ -749,7 +749,7 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
         % how you judge the pair. Showing all three costs nothing and each answers its own question.
         g = uigridlayout(parent,[3 1],'RowHeight',{30,28,'1x'},'Padding',[8 8 8 8],'RowSpacing',5);
 
-        hr = uigridlayout(g,[1 8],'ColumnWidth',{'1x',74,74,70,100,66,86,96},'Padding',[0 0 0 0],'ColumnSpacing',6);
+        hr = uigridlayout(g,[1 9],'ColumnWidth',{'1x',70,70,68,94,62,78,92,142},'Padding',[0 0 0 0],'ColumnSpacing',5);
         lblPair = uilabel(hr,'Text','Select a pair in the Co-motion tab.','FontColor',[0.35 0.35 0.4]);
         uibutton(hr,'Text','◀ prev','ButtonPushedFcn',@(s,e) stepPair(-1));
         uibutton(hr,'Text','next ▶','ButtonPushedFcn',@(s,e) stepPair(+1));
@@ -762,6 +762,12 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
             'ValueChangedFcn',@(s,e) drawPairImage());
         chkZoom = uicheckbox(hr,'Text','Zoom to pair','Value',true, ...
             'ValueChangedFcn',@(s,e) drawPairImage());
+        ddView4 = uidropdown(hr,'Items',{'centred paths','step rose','unit rose','shared vs relative'}, ...
+            'ItemsData',{'centred','rose','unitrose','decompose'},'Value','centred', ...
+            'Tooltip',['What the fourth panel shows. All of them take the space between the two ' ...
+                       'molecules out, so their motion can be compared directly instead of across ' ...
+                       'the gap between them.'], ...
+            'ValueChangedFcn',@(s,e) drawPairImage());
 
         sr = uigridlayout(g,[1 3],'ColumnWidth',{'1x',150,110},'Padding',[0 0 0 0],'ColumnSpacing',6);
         sldP = uislider(sr,'Limits',[1 100],'Value',1,'MajorTicks',[], ...
@@ -773,20 +779,22 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
         % Images left, traces right. The three image panels share the left half: each colour on its
         % own along the top, the merge beneath them spanning both — the merge is the one you read
         % the pair off, so it gets the wider box.
-        mn = uigridlayout(g,[1 2],'ColumnWidth',{'1.15x','1x'},'Padding',[0 0 0 0],'ColumnSpacing',8);
-        imgs = uigridlayout(mn,[2 2],'RowHeight',{'1x','1.15x'},'ColumnWidth',{'1x','1x'}, ...
+        % Images left, traces right. Top row: each colour alone, in grey. Bottom row: the merge
+        % with the quiver in place, and beside it the same motion with the space between the two
+        % taken out — which is where "do they move together" is actually legible.
+        mn = uigridlayout(g,[1 2],'ColumnWidth',{'1.25x','1x'},'Padding',[0 0 0 0],'ColumnSpacing',8);
+        imgs = uigridlayout(mn,[2 2],'RowHeight',{'1x','1.1x'},'ColumnWidth',{'1x','1x'}, ...
             'Padding',[0 0 0 0],'RowSpacing',4,'ColumnSpacing',4);
-        axP = gobjects(1,3);
-        for i = 1:3
+        axP = gobjects(1,4);
+        for i = 1:4
             pn = uipanel(imgs,'BorderType','none');
-            if i == 3, pn.Layout.Row = 2; pn.Layout.Column = [1 2]; end
-            axP(i) = uiaxes(pn); axP(i).Units='normalized'; axP(i).Position=[0.10 0.09 0.85 0.82];
+            axP(i) = uiaxes(pn); axP(i).Units='normalized'; axP(i).Position=[0.13 0.11 0.82 0.78];
         end
         host = uipanel(mn,'BorderType','none');       % the traces get the whole right half
 
         setappdata(fig,'pair', struct('host',host,'ax',axP,'lbl',lblPair,'k',0,'tp',1, ...
             'win',spnWin,'quiv',chkQuiv,'zoom',chkZoom,'sld',sldP,'tpLbl',lblTp, ...
-            'play',btnPlayP,'fps',spnFps,'timer',[]));
+            'play',btnPlayP,'fps',spnFps,'timer',[],'view4',ddView4));
     end
 
     function onPairSlide(v)
@@ -887,6 +895,12 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
             hold(ax,'off');
             title(ax, names{i}, 'FontSize', 9);
         end
+
+        % the fourth panel: the same pair with the offset between them removed
+        m4 = pp.view4.Value;
+        vi = dc_comotion_view(pp.ax(4), sw, strrep(m4,'unitrose','rose'), ...
+            struct('unit', strcmp(m4,'unitrose')));
+        St.lastView = vi;
 
         if isgraphics(pp.sld), pp.sld.Limits = [min(tps) max(tps)]; pp.sld.Value = tpNow; end
         pp.tp = tpNow; setappdata(fig,'pair',pp);
@@ -1116,8 +1130,15 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
         Hp = dc_pair_panel(St.D, St.R, k, struct('parent',pp.host,'null',St.N,'dtS',dtv));
         drawPairImage();
         pp = getappdata(fig,'pair');
-        pp.lbl.Text = sprintf('pair %d of %d — tracks %g and %g, %d shared steps, cos %+.3f, %.0f nm apart', ...
-            k, height(St.R.pairs), Hp.trackA, Hp.trackB, Hp.n, Hp.meanCos, 1000*Hp.rMedian);
+        sh = '';
+        if isfield(St,'lastView') && ~isempty(St.lastView) && isfinite(St.lastView.shared)
+            % `shared` is the correlation itself; the cosine estimates (pi/4) times it. Both are
+            % shown because the cosine is what the pair list is ranked by.
+            sh = sprintf(', shared %+.2f', St.lastView.shared);
+        end
+        pp.lbl.Text = sprintf(['pair %d of %d — tracks %g and %g, %d steps, cos %+.3f%s, ' ...
+            '%.0f nm apart'], k, height(St.R.pairs), Hp.trackA, Hp.trackB, Hp.n, Hp.meanCos, ...
+            sh, 1000*Hp.rMedian);
         tg.SelectedTab = t5;      % the Pair tab — t4 is Co-motion since the Track tab arrived
     end
 

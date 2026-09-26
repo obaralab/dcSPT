@@ -29,7 +29,12 @@ function dc_comotion_smoke()
 %   8. THE PAIR PANEL reads integrated intensity, counts the bleaching steps that were injected into
 %      it, and refuses a same-colour pair — whose two intensity traces could have been swapped by the
 %      linker, which is exactly what a step count must not be handed.
-%   9. SPANS ARE NOT MIXED. A step over two timepoints is not simultaneous with one over a single
+%   9. THE OFFSET-REMOVED VIEW RECOVERS THE CORRELATION ITSELF. dc_comotion_view splits each pair of
+%      steps into what the two shared and what they did not, and its `shared` index reads the
+%      injected correlation directly — unlike the mean cosine, which reads (pi/4)*rho. It also
+%      refuses to report a mean direction for a pair with no net drift, where the mean of the steps
+%      is noise and the angle between two such means is uniformly random.
+%  10. SPANS ARE NOT MIXED. A step over two timepoints is not simultaneous with one over a single
 %      timepoint, and pairing them is refused rather than silently averaged.
 %
 % Synthetic; reads no dataset.
@@ -213,16 +218,53 @@ if ~isempty(sameTruth)
     end
 end
 
-%% (9) spans are not mixed -----------------------------------------------------------------------
+%% (9) the offset-removed view ------------------------------------------------------------------
+rng(3); nv = 300; sdv = 0.035;
+for cTrue = [0 0.3 0.6 0.9]
+    shv = sdv*sqrt(cTrue)*randn(nv,2);
+    uu = shv + sdv*sqrt(1-cTrue)*randn(nv,2);
+    vv = shv + sdv*sqrt(1-cTrue)*randn(nv,2);
+    stv = table(zeros(nv,1),zeros(nv,1),zeros(nv,1),zeros(nv,1),(1:nv)', ...
+                uu(:,1),uu(:,2),vv(:,1),vv(:,2), ...
+        'VariableNames',{'xa','ya','xb','yb','tp','uax','uay','ubx','uby'});
+    fv = figure('Visible','off'); axv = axes(fv);
+    iv = dc_comotion_view(axv, stv, 'decompose');
+    assert(abs(iv.shared - cTrue) < 0.08, ...
+        ['shared must read the correlation itself, not a proxy: injected %.2f, got %+.3f. The mean ' ...
+         'cosine would read about %.2f for the same pair.'], cTrue, iv.shared, pi/4*cTrue);
+    if cTrue == 0
+        assert(iv.relRms > 0.8*iv.commonRms, ...
+            'with nothing shared the two clouds should be the same size (%.0f vs %.0f nm)', ...
+            1000*iv.commonRms, 1000*iv.relRms);
+    elseif cTrue == 0.9
+        assert(iv.relRms < 0.45*iv.commonRms, ...
+            'at 0.9 the relative cloud should be far tighter than the common one (%.0f vs %.0f nm)', ...
+            1000*iv.commonRms, 1000*iv.relRms);
+    end
+    % these fixtures have no net drift, so the mean direction must be refused rather than invented
+    assert(~iv.meanResolved && isnan(iv.meanAngleDeg), ...
+        'a pair with no net drift has no mean direction; got %.0f deg', iv.meanAngleDeg);
+    close(fv);
+end
+% every mode must draw without error
+for md = {'centred','rose','decompose'}
+    fv = figure('Visible','off'); axv = axes(fv);
+    dc_comotion_view(axv, stv, md{1}, struct('unit', strcmp(md{1},'rose')));
+    assert(~isempty(axv.Children), '%s should draw something', md{1});
+    close(fv);
+end
+fprintf('(9) shared index tracks injected correlation 0/0.3/0.6/0.9; mean direction refused with no drift\n');
+
+%% (10) spans are not mixed -----------------------------------------------------------------------
 Dg = makeSet(nT, cInj, nPair, nFree, sd, 0, 0.12);   % 12%% of localizations dropped -> real gaps
 Smix = dc_steps(Dg, struct('span', []));
 if numel(unique(Smix.span)) > 1
     err = ''; try, dc_comotion(Smix); catch ME, err = ME.identifier; end
     assert(strcmp(err,'dc_comotion:mixedSpan'), ...
         'pairing steps of different spans must be refused, got "%s"', err);
-    fprintf('(9) mixed spans refused: %s\n', mat2str(unique(Smix.span)'));
+    fprintf('(10) mixed spans refused: %s\n', mat2str(unique(Smix.span)'));
 else
-    fprintf('(9) the fixture produced no gaps; span guard not exercised\n');
+    fprintf('(10) the fixture produced no gaps; span guard not exercised\n');
 end
 
 fprintf('\nDC-COMOTION SMOKE PASSED.\n');
