@@ -25,7 +25,9 @@ function dc_app_smoke()
 %      being swapped, which is otherwise silent.
 %   9. EVERY PARAMETER IS PER COLOUR. The two channels are different molecules detected with
 %      different reliability, so a shared link radius or minimum length is right for at most one.
-%  10. EVERY BUTTON GOES THROUGH THE API. The test calls only H.api, so if a callback ever does its
+%  10. A PROJECT SURVIVES THE SESSION. Opening a folder matches its pairs, saving writes the
+%      manifest and one curatable spots CSV per colour per cell, and reopening finds them.
+%  11. EVERY BUTTON GOES THROUGH THE API. The test calls only H.api, so if a callback ever does its
 %      own work instead of delegating, this stops testing the app and the count below catches it.
 %
 % Headless: every figure is built with 'visible','off'.
@@ -278,10 +280,34 @@ assert(nc1 > 0 && nc2 == 0, ...
 H.api.setParam('minLen', [5 5]); H.api.curate(-1);
 fprintf('(9) per-colour minimum length: c1 %d tracks, c2 %d when only c2 is filtered out\n', nc1, nc2);
 
-%% (10) the buttons delegate ---------------------------------------------------------------------------
+%% (10) the project on disk ----------------------------------------------------------------------
+% the fixture folder already holds Ch1/Ch2 for one cell, which is what dc_match pairs on
+H.api.openProject(tmp, true);
+Pj = H.api.project();
+assert(~isempty(Pj) && numel(Pj.cells) >= 1, 'opening a project should match at least one cell');
+assert(isequal(Pj.match.tokens, {'Ch1','Ch2'}), 'with the default rule recorded, got %s', ...
+    strjoin(Pj.match.tokens, ','));
+H.api.saveProject();
+assert(isfile(fullfile(tmp,'experiment_dc.mat')), 'Save must write the manifest');
+csvs = dir(fullfile(tmp,'tracks','*_spots.csv'));
+assert(numel(csvs) >= 2, ...
+    'and a spots CSV per colour for every tracked cell, got %d', numel(csvs));
+
+% reopening finds them, and the cells come back
+H2 = dc_app(struct('visible','off'));
+c2b = onCleanup(@() close(H2.fig));
+H2.api.openProject(tmp, false);
+Pj2 = H2.api.project();
+assert(numel(Pj2.cells) == numel(Pj.cells), ...
+    'reopening must find the same cells (%d vs %d)', numel(Pj.cells), numel(Pj2.cells));
+assert(isequal(Pj2.match.tokens, Pj.match.tokens), 'and the same matching rule');
+fprintf('(10) project: %d cell(s), manifest + %d spots CSV(s), reopened\n', ...
+    numel(Pj.cells), numel(csvs));
+
+%% (11) the buttons delegate ---------------------------------------------------------------------------
 assert(all(isfield(H.api, {'loadFolder','detectPreview','runTracking','runComotion','showPair'})), ...
     'the api must expose every action a button performs');
-fprintf('(10) api exposes %d actions\n', numel(fieldnames(H.api)));
+fprintf('(11) api exposes %d actions\n', numel(fieldnames(H.api)));
 
 fprintf('\nDC-APP SMOKE PASSED.\n');
 end

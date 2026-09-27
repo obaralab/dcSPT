@@ -51,6 +51,7 @@ St = struct('folder','', 'stacks',{{}}, 'C',[], 'D',[], 'Draw',[], 'R',[], 'N',[
 cells = struct('folder',{}, 'name',{}, 'stacks',{}, 'C',[], 'D',[], 'Draw',[], 'R',[], 'N',[], ...
                'pool',{}, 'thr',[], 'rejected',[], 'pxUm',[], 'dtS',[], 'align',[], 'status',{});
 iCell = 0;
+Proj = [];                 % the manifest on disk, when the cells came from a project folder
 % Thresholding follows SPTinMatlab: pool the DoG candidate qualities over sampled frames, then cut
 % at a top percentile of THAT distribution. The histogram is the control; the number is read off it.
 % Per COLOUR, not per cell. The two channels are different fluorophores on different molecules:
@@ -109,6 +110,7 @@ H.api = struct('loadFolder',@loadFolder, 'detectPreview',@detectPreview, ...
                'showPair',@showPair, 'state',@getState, 'params',@getParams, 'coParams',@getCo, ...
                'setParam',@setParam, 'setCo',@setCo, 'export',@onExport, ...
                'poolQuality',@poolQuality, 'showFrame',@showTrackFrame, 'curate',@curateTrack, ...
+               'openProject',@openProject, 'saveProject',@onSaveProject, 'project',@getProj, ...
                'pool',@getPool, 'addCell',@addCell, 'selectCell',@selectCell, ...
                'cells',@getCells, 'runAll',@onRunAll);
 
@@ -120,23 +122,40 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
         % what stage each one has reached, and which is selected. Settings are shared across cells;
         % results are not, and neither is the pooled quality — a percentile of another cell's
         % candidate distribution is not this cell's threshold.
-        g = uigridlayout(parent,[4 1],'RowHeight',{28,'1x',76,26},'Padding',[10 10 10 10],'RowSpacing',7);
+        g = uigridlayout(parent,[5 1],'RowHeight',{28,28,'1x',72,26},'Padding',[10 10 10 10],'RowSpacing',6);
 
-        hr = uigridlayout(g,[1 6],'ColumnWidth',{'1x',108,120,104,96,104},'Padding',[0 0 0 0],'ColumnSpacing',6);
-        lblProj = uilabel(hr,'Text','No cells yet. Add one folder per cell, or scan a parent folder.', ...
+        pr = uigridlayout(g,[1 7],'ColumnWidth',{'1x',112,118,104,86,150,86},'Padding',[0 0 0 0],'ColumnSpacing',6);
+        lblProjPath = uilabel(pr,'Text','No project. Open one, or point at a folder of paired stacks.', ...
             'FontColor',[0.45 0.45 0.5]);
+        uibutton(pr,'Text','New project…','Tooltip', ...
+            ['Pick a folder holding this experiment''s movies. It gets an experiment_dc.mat ' ...
+             'manifest, a tracks/ folder of curatable spots CSVs and an analysis/ folder.'], ...
+            'ButtonPushedFcn',@(s,e) onNewProject());
+        uibutton(pr,'Text','Open project…','ButtonPushedFcn',@(s,e) onOpenProject());
+        uibutton(pr,'Text','Re-scan','Tooltip', ...
+            'Match again with the saved rule, keeping the conditions and calibrations already entered.', ...
+            'ButtonPushedFcn',@(s,e) onRescan());
+        uilabel(pr,'Text','Pair by','HorizontalAlignment','right');
+        eTokens = uieditfield(pr,'text','Value','Ch1,Ch2', ...
+            'Tooltip',['How the two colours are told apart: two tokens separated by a comma, or a ' ...
+                       'regexp with <base> and <ch> groups. A stack whose ImageJ labels name two ' ...
+                       'channels is one cell on its own and needs neither.'], ...
+            'ValueChangedFcn',@(s,e) onRescan());
+        uibutton(pr,'Text','Save','FontWeight','bold','ButtonPushedFcn',@(s,e) onSaveProject());
+
+        hr = uigridlayout(g,[1 5],'ColumnWidth',{'1x',108,104,96,104},'Padding',[0 0 0 0],'ColumnSpacing',6);
+        lblProj = uilabel(hr,'Text','No cells yet.','FontColor',[0.45 0.45 0.5]);
         uibutton(hr,'Text','Add cell…','ButtonPushedFcn',@(s,e) onAddCell());
-        uibutton(hr,'Text','Scan folder…','Tooltip', ...
-            'Add every subfolder that holds two TIFF stacks, as one cell each.', ...
-            'ButtonPushedFcn',@(s,e) onScan());
         uibutton(hr,'Text','Remove','ButtonPushedFcn',@(s,e) onRemoveCell());
         uibutton(hr,'Text','Run all','FontWeight','bold','Tooltip', ...
             'Pool, detect, track and run co-motion on every cell with the current settings.', ...
             'ButtonPushedFcn',@(s,e) onRunAll());
         uibutton(hr,'Text','Export all…','ButtonPushedFcn',@(s,e) onExportAll());
 
-        tblCells = uitable(g,'ColumnName',{'cell','colours','frames','tracks','pairs','status'}, ...
-            'ColumnWidth',{'auto',80,72,72,64,140},'RowName',{}, ...
+        tblCells = uitable(g,'ColumnName',{'cell','condition','colours','frames','tracks','pairs','status'}, ...
+            'ColumnWidth',{'auto',110,70,66,66,60,120},'RowName',{}, ...
+            'ColumnEditable',[false true false false false false false], ...
+            'CellEditCallback',@(s,e) onEditCell(e), ...
             'SelectionType','row', 'CellSelectionCallback',@(s,e) onPickCell(e));
 
         ap = uigridlayout(g,[2 1],'RowHeight',{20,'1x'},'Padding',[0 0 0 0],'RowSpacing',3);
@@ -147,7 +166,114 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
         tblCh = uitable(g,'ColumnName',{'colour','stack','pages','frames','timepoints','dt (s)','source'}, ...
             'ColumnWidth',{62,'auto',64,64,96,80,88},'RowName',{});
 
-        setappdata(fig,'cells', struct('tbl',tblCells,'ch',tblCh,'align',lblAlign,'proj',lblProj));
+        setappdata(fig,'cells', struct('tbl',tblCells,'ch',tblCh,'align',lblAlign,'proj',lblProj, ...
+            'projPath',lblProjPath,'tokens',eTokens));
+    end
+
+    function onNewProject()
+        f = uigetdir(pwd, 'Project folder — the movies for this experiment');
+        if isequal(f,0), return; end
+        openProject(f, true);
+    end
+    function onOpenProject()
+        f = uigetdir(pwd, 'Project folder holding experiment_dc.mat');
+        if isequal(f,0), return; end
+        openProject(f, false);
+    end
+
+    function openProject(folder, isNew)
+        c = getappdata(fig,'cells');
+        mo = matchOpts(c.tokens.Value);
+        if isNew || ~isfile(fullfile(folder,'experiment_dc.mat'))
+            Proj = dc_project('scan', folder, mo);
+        else
+            Proj = dc_project('load', folder);
+            if isfield(Proj.match,'tokens') && ~isempty(Proj.match.tokens)
+                c.tokens.Value = strjoin(Proj.match.tokens, ',');
+            elseif ~isempty(Proj.match.pattern)
+                c.tokens.Value = Proj.match.pattern;
+            end
+            Proj = dc_project('scan', folder);        % pick up anything added since
+        end
+        adoptProject();
+    end
+
+    function onRescan()
+        if isempty(Proj), return; end
+        c = getappdata(fig,'cells');
+        Proj = dc_project('scan', Proj.folder, matchOpts(c.tokens.Value));
+        adoptProject();
+    end
+
+    function mo = matchOpts(txt)
+        txt = strtrim(char(txt));
+        if contains(txt,'<base>') && contains(txt,'<ch>')
+            mo = struct('pattern', txt);            % a regexp, for names a token cannot express
+        else
+            parts = strtrim(strsplit(txt, ','));
+            parts = parts(~cellfun(@isempty, parts));
+            mo = struct('tokens', {parts});
+        end
+    end
+
+    function adoptProject()
+        % The manifest is the source of truth for WHICH cells exist; anything already computed in
+        % this session for a cell of the same key is kept, so re-scanning does not throw away work.
+        stash();
+        old = cells;
+        cells = cells([]);
+        for k = 1:numel(Proj.cells)
+            q = Proj.cells(k);
+            j = find(strcmp({old.name}, q.key), 1);   % the app keys its cells by .name
+            if ~isempty(j)
+                c2 = old(j);
+            else
+                c2 = struct('folder',fileparts(q.stacks{1}), 'name',q.key, 'stacks',{q.stacks}, ...
+                    'C',[], 'D',[], 'Draw',[], 'R',[], 'N',[], 'pool',{{[] []}}, 'thr',prm.thr, ...
+                    'rejected',[], 'pxUm',q.pxUm, 'dtS',q.dtS, 'align',[], 'status','matched');
+            end
+            c2.name = q.key; c2.stacks = q.stacks;
+            cells(end+1) = c2; %#ok<AGROW>
+        end
+        iCell = min(max(iCell,1), numel(cells));
+        c = getappdata(fig,'cells');
+        c.projPath.Text = sprintf('%s  ·  %d cell(s)%s', Proj.folder, numel(Proj.cells), ...
+            tern(isfield(Proj,'scanInfo') && ~isempty(Proj.scanInfo.unpaired), ...
+                 sprintf('  ·  %d unpaired', numel(Proj.scanInfo.unpaired)), ''));
+        refreshCells();
+        if isfield(Proj,'scanInfo'), say('%s', Proj.scanInfo.text); end
+        if ~isempty(cells), selectCell(iCell); end
+    end
+
+    function onSaveProject()
+        if isempty(Proj), say('no project open — use New project…'); return; end
+        stash();
+        for k = 1:numel(Proj.cells)
+            j = find(strcmp({cells.name}, Proj.cells(k).key), 1);
+            if isempty(j), continue; end
+            Proj.cells(k).pxUm = cells(j).pxUm; Proj.cells(k).dtS = cells(j).dtS;
+            Proj.cells(k).rejected = cells(j).rejected;
+            Proj.cells(k).status = stageOf(j);
+            if ~isempty(cells(j).D)
+                Proj.cells(k).nTracks = numel(unique(cells(j).D.spots.trackId( ...
+                    isfinite(cells(j).D.spots.trackId))));
+                dc_project('writeTracks', Proj, Proj.cells(k).key, cells(j).D);
+            end
+            if ~isempty(cells(j).R), Proj.cells(k).nPairs = height(cells(j).R.pairs); end
+        end
+        Proj.params = prm;
+        dc_project('save', Proj);
+        say('saved %s: manifest, and a spots CSV per colour for every tracked cell', ...
+            fullfile(Proj.folder,'experiment_dc.mat'));
+    end
+
+    function onEditCell(e)
+        if isempty(e.Indices) || isempty(Proj), return; end
+        r = e.Indices(1);
+        if e.Indices(2) == 2 && r <= numel(Proj.cells)
+            Proj.cells(r).condition = char(string(e.NewData));
+            say('%s: condition "%s"', Proj.cells(r).key, Proj.cells(r).condition);
+        end
     end
 
     function onAddCell()
@@ -237,7 +363,7 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
         c = getappdata(fig,'cells');
         if isempty(c) || ~isgraphics(c.tbl), return; end
         stash();
-        rows = cell(numel(cells), 6);
+        rows = cell(numel(cells), 7);
         for k = 1:numel(cells)
             q = cells(k);
             nCol = numel(q.C);
@@ -245,7 +371,12 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
             nTr = ''; if ~isempty(q.D)
                 nTr = sprintf('%d', numel(unique(q.D.spots.trackId(isfinite(q.D.spots.trackId))))); end
             nPr = ''; if ~isempty(q.R), nPr = sprintf('%d', height(q.R.pairs)); end
-            rows(k,:) = {q.name, sprintf('%d', nCol), nFr, nTr, nPr, stageOf(k)};
+            cond = '';
+            if ~isempty(Proj)
+                jj = find(strcmp({Proj.cells.key}, q.name), 1);
+                if ~isempty(jj), cond = Proj.cells(jj).condition; end
+            end
+            rows(k,:) = {q.name, cond, sprintf('%d', nCol), nFr, nTr, nPr, stageOf(k)};
         end
         c.tbl.Data = rows;
         if iCell >= 1 && iCell <= numel(cells), c.tbl.Selection = iCell; end
@@ -451,6 +582,7 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
 
     function q = getPool(), q = pool; end
     function c = getCells(), stash(); c = cells; end
+    function q = getProj(), q = Proj; end
 
     function poolQuality()
         assert(~isempty(St.C), 'dc_app:noCells', 'pick a folder first');
@@ -574,19 +706,20 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
              'writes them. Tracking is the slow part and a curated set is better than a re-derived one.'], ...
             'ButtonPushedFcn',@(s,e) onImportTracks());
 
-        r2 = uigridlayout(cp,[1 9],'ColumnWidth',{'1x',118,96,70,88,70,86,80,86}, ...
+        % TEN children, so the grid declares ten columns. A uigridlayout given more children than it
+        % has cells does not complain — it squeezes them into the last one, which is what turned this
+        % row into a strip of overlapping slivers.
+        r2 = uigridlayout(cp,[1 10],'ColumnWidth',{'1x',76,104,56,52,52,58,50,62,100}, ...
             'Padding',[0 0 0 0],'ColumnSpacing',5);
         sldT = uislider(r2,'Limits',[1 100],'Value',1,'MajorTicks',[], ...
             'ValueChangingFcn',@(s,e) showTrackFrame(round(e.Value)));
         btnPlayT = uibutton(r2,'Text','▶ Play','ButtonPushedFcn',@(s,e) onPlay());
+        uilabel(r2,'Text','Frames (0 = all)','HorizontalAlignment','right');
         uieditfield(r2,'numeric','Value',0,'Limits',[0 1e6],'RoundFractionalValues',true, ...
             'Tooltip','Frames to process, 0 = all.', ...
             'ValueChangedFcn',@(s,e) setParam('maxFrames', tern(s.Value>0, s.Value, [])));
-        % No view dropdown: all three are on screen at once. Each colour alone in grey is how a
-        % detection is judged; the merge is how a pair is. Making them alternatives meant flipping
-        % back and forth to answer two questions about the same frame.
-        ddView = uilabel(r2,'Text','c1 · c2 · merged','FontColor',[0.45 0.45 0.5]);
-        uilabel(r2,'Text','Tail (frames)','HorizontalAlignment','right');
+        ddView = [];   % the three panels are titled; a legend row for them was redundant
+        uilabel(r2,'Text','Tail','HorizontalAlignment','right');
         spnTail = uieditfield(r2,'numeric','Value',40,'Limits',[1 1e5],'RoundFractionalValues',true, ...
             'Tooltip','How much of each track''s history to draw behind it.', ...
             'ValueChangedFcn',@(s,e) showTrackFrame([]));
@@ -602,7 +735,8 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
             'ButtonPushedFcn',@(s,e) onRejectClick());
 
         r3 = uigridlayout(cp,[1 1],'Padding',[0 0 0 0]);
-        lblTrk = uilabel(r3,'Text','Track both colours to see them here.','FontColor',[0.35 0.35 0.4]);
+        lblTrk = uilabel(r3,'Text','Track both colours, or Import tracks made elsewhere.', ...
+            'FontColor',[0.35 0.35 0.4]);
 
         % Each axes lives in a uipanel, not directly in the grid. A uiaxes that is a grid child
         % resizes ITSELF to the data aspect ratio and will happily grow past its cell, ending up
@@ -613,6 +747,7 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
             pn = uipanel(row3,'BorderType','none');
             axT(i) = uiaxes(pn); axT(i).Units = 'normalized'; axT(i).Position = [0.08 0.07 0.87 0.85];
             axT(i).Toolbar.Visible = 'on';
+            axis(axT(i),'off');            % no 0-1 grid before there is a frame to show
         end
 
         lg = uigridlayout(g,[1 1],'Padding',[0 0 0 0]);
@@ -744,6 +879,7 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
             for i = 1:3
                 cla(t.ax(i));
                 t.him(i) = image(t.ax(i), zeros(size(A,1), size(A,2), 3));
+                axis(t.ax(i),'on');
                 set(t.ax(i),'DataAspectRatio',[1 1 1],'YDir','reverse');
                 title(t.ax(i), names{i}, 'FontSize', 9);
                 hold(t.ax(i),'on');
