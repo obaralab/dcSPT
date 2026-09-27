@@ -20,7 +20,12 @@ function dc_app_smoke()
 %   6. THE PAIR PANEL DRAWS INTO THE TAB rather than a new window, and moves with prev/next.
 %   7. MANY CELLS, ONE AT A TIME. A second cell can be added, selected, and its own results kept
 %      separate — settings are shared, results and the pooled quality are not.
-%   8. EVERY BUTTON GOES THROUGH THE API. The test calls only H.api, so if a callback ever does its
+%   8. TRACKS CAN BE IMPORTED instead of made here, from a spots CSV per colour, and the importer
+%      refuses a file whose frames the colour does not have — the signature of two colours' files
+%      being swapped, which is otherwise silent.
+%   9. EVERY PARAMETER IS PER COLOUR. The two channels are different molecules detected with
+%      different reliability, so a shared link radius or minimum length is right for at most one.
+%  10. EVERY BUTTON GOES THROUGH THE API. The test calls only H.api, so if a callback ever does its
 %      own work instead of delegating, this stops testing the app and the count below catches it.
 %
 % Headless: every figure is built with 'visible','off'.
@@ -225,10 +230,58 @@ assert(height(H.api.state().R.pairs) == nPairs, 'and the same pairs (%d)', nPair
 fprintf('(7) two cells: %d and %d frames, results kept apart\n', ...
     cl(1).C(1).nFrames, cl(2).C(1).nFrames);
 
-%% (8) the buttons delegate ---------------------------------------------------------------------------
+%% (8) importing tracks ------------------------------------------------------------------------------
+St = H.api.state();
+csv1 = fullfile(tmp,'c1_spots.csv');  csv2 = fullfile(tmp,'c2_spots.csv');
+writeSpotsCsv(csv1, St.D, St.C(1).key);
+writeSpotsCsv(csv2, St.D, St.C(2).key);
+nTrBefore = numel(unique(St.D.spots.trackId(isfinite(St.D.spots.trackId))));
+
+R1 = dc_import_spots(csv1, St.C(1));
+R2 = dc_import_spots(csv2, St.C(2));
+Di = dc_dataset('new','imported',St.C);
+Di = dc_dataset('addChannel', Di, R1);
+Di = dc_dataset('addChannel', Di, R2);
+nTrIn = numel(unique(Di.spots.trackId(isfinite(Di.spots.trackId))));
+assert(nTrIn == nTrBefore, ...
+    'a round trip through the CSV must preserve the track count (%d -> %d)', nTrBefore, nTrIn);
+assert(any(isfinite(Di.spots.iTot)), 'and carry the intensity the bleaching panels need');
+% positions survive to within the CSV's printed precision
+xIn = sort(Di.spots.x); xWas = sort(St.D.spots.x);
+assert(max(abs(xIn - xWas)) < 1e-4, 'positions must survive the round trip (max %g um)', ...
+    max(abs(xIn - xWas)));
+
+% a file belonging to the OTHER colour must be refused, not truncated
+Cshort = St.C(1); Cshort.nFrames = 5;
+err = ''; try, dc_import_spots(csv1, Cshort); catch ME, err = ME.identifier; end
+assert(strcmp(err,'dc_import_spots:frameRange'), ...
+    'a spots file naming frames the colour does not have must be refused, got "%s"', err);
+fprintf('(8) round trip: %d tracks in, %d out; wrong-colour file refused\n', nTrBefore, nTrIn);
+
+%% (9) parameters are per colour -----------------------------------------------------------------
+H.api.setParam('linkUm', [0.5 0.9]);
+H.api.setParam('minLen', [4 9]);
+pp2 = H.api.params();
+assert(numel(pp2.linkUm) == 2 && pp2.linkUm(1) ~= pp2.linkUm(2), ...
+    'link radius must be per colour, got %s', mat2str(pp2.linkUm));
+assert(numel(pp2.diamUm) == 2 && numel(pp2.maxGap) == 2 && numel(pp2.minLen) == 2, ...
+    'diameter, gap and minimum length must all be per colour');
+% the per-colour minimum must actually bite differently on the two
+H.api.setParam('minLen', [2 1000]);
+H.api.curate(-1);                       % a no-op id, to force re-curation
+Sx = H.api.state();
+nc1 = numel(unique(Sx.D.spots.trackId(Sx.D.spots.ch == Sx.C(1).key & isfinite(Sx.D.spots.trackId))));
+nc2 = numel(unique(Sx.D.spots.trackId(Sx.D.spots.ch == Sx.C(2).key & isfinite(Sx.D.spots.trackId))));
+assert(nc1 > 0 && nc2 == 0, ...
+    ['a minimum length of 1000 on c2 alone must empty c2 and leave c1 (got %d and %d) — one shared ' ...
+     'number could not do that'], nc1, nc2);
+H.api.setParam('minLen', [5 5]); H.api.curate(-1);
+fprintf('(9) per-colour minimum length: c1 %d tracks, c2 %d when only c2 is filtered out\n', nc1, nc2);
+
+%% (10) the buttons delegate ---------------------------------------------------------------------------
 assert(all(isfield(H.api, {'loadFolder','detectPreview','runTracking','runComotion','showPair'})), ...
     'the api must expose every action a button performs');
-fprintf('(8) api exposes %d actions\n', numel(fieldnames(H.api)));
+fprintf('(10) api exposes %d actions\n', numel(fieldnames(H.api)));
 
 fprintf('\nDC-APP SMOKE PASSED.\n');
 end
@@ -361,3 +414,14 @@ function b = u16be(s)
 u = double(s); b = uint8(zeros(1, 2*numel(u)));
 b(1:2:end) = floor(u/256); b(2:2:end) = mod(u,256);
 end
+
+function writeSpotsCsv(path, D, chKey)
+% One colour's localizations in the shape SPTinMatlab's exporter writes, so the importer is tested
+% against the column names it will actually meet rather than ones invented here.
+S = D.spots(D.spots.ch == chKey, :);
+T = table(S.trackId, (0:height(S)-1)', S.frame, S.frame*0.012, S.x, S.y, S.q, S.iTot, ...
+    'VariableNames', {'TRACK_ID','SPOT_ID','FRAME','T_s','X_um','Y_um','QUALITY','TOTAL_INTENSITY'});
+writetable(T, path);
+end
+
+function y = tern(c,a,b), if c, y=a; else, y=b; end, end

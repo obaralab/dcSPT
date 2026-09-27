@@ -36,6 +36,10 @@ function H = dc_pair_panel(D, R, pair, opts)
 %   .visible    'on'
 %   .parent     []  a figure, panel or tab to draw into instead of a new figure, so the app can host
 %                   the same panel it would otherwise pop up. The container is cleared first.
+%   .axes       []  three existing axes to draw into, in place of building a layout. Rebuilding a
+%                   tiledlayout and three axes costs about half a second in a uifigure, which is
+%                   most of what stepping between pairs used to cost; handing the same three axes
+%                   back each time turns that into clearing and replotting them.
 %
 % OUTPUT H: .fig .ax(3) .stepsA .stepsB (the dc_pbsa_steps results) .n .meanCos .rMedian
 
@@ -81,23 +85,33 @@ assert(~isempty(st), 'dc_pair_panel:noSteps', 'no shared steps for this pair');
 xs = @(tp) toX(tp, dtS);
 xl = 'timepoint'; if ~isempty(dtS), xl = 'time (s)'; end
 
+reuse = getf(opts,'axes',[]);
 par = getf(opts,'parent',[]);
-if isempty(par)
+tl = [];
+if ~isempty(reuse) && numel(reuse) == 3 && all(isgraphics(reuse))
+    H.ax = reuse(:)';                 % draw into what the caller already built
+    H.fig = ancestor(reuse(1),'figure'); H.owned = false;
+    for q = 1:3, cla(H.ax(q)); end
+elseif isempty(par)
     H.fig = figure('Color','w','Visible',vis,'Position',[60 60 1040 860], ...
         'Name', sprintf('pair %g-%g', idA, idB));
     par = H.fig; H.owned = true;
+    tl = tiledlayout(par, 3, 1, 'TileSpacing','compact', 'Padding','compact');
 else
     delete(allchild(par));            % the caller reuses one container across pairs
     H.fig = ancestor(par,'figure'); H.owned = false;
+    tl = tiledlayout(par, 3, 1, 'TileSpacing','compact', 'Padding','compact');
 end
-tl = tiledlayout(par, 3, 1, 'TileSpacing','compact', 'Padding','compact');
 
 % ---- panels 1 and 2: integrated intensity, with bleaching steps --------------------------------
-[H.ax(1), H.stepsA] = intensityPanel(tl, xs(tA), iA, chA, minSt, xl);
-[H.ax(2), H.stepsB] = intensityPanel(tl, xs(tB), iB, chB, minSt, xl);
+a1 = []; a2 = []; a3 = [];
+if isempty(tl), a1 = H.ax(1); a2 = H.ax(2); a3 = H.ax(3); end
+[H.ax(1), H.stepsA] = intensityPanel(tl, a1, xs(tA), iA, chA, minSt, xl);
+[H.ax(2), H.stepsB] = intensityPanel(tl, a2, xs(tB), iB, chB, minSt, xl);
 
 % ---- panel 3: co-motion -------------------------------------------------------------------------
-ax = nexttile(tl); H.ax(3) = ax; hold(ax,'on');
+if isempty(tl), ax = a3; else, ax = nexttile(tl); end
+H.ax(3) = ax; hold(ax,'on');
 x = xs(st.tp);
 plot(ax, x, st.cos, '.', 'Color', [0.62 0.67 0.72], 'MarkerSize', 5, ...
      'DisplayName', 'per-step cos\theta');
@@ -129,16 +143,19 @@ legend(ax, 'Location','southoutside', 'Orientation','horizontal', 'Box','off', '
 title(ax, sprintf('co-motion: %d shared steps, mean cos %+.3f%s, median separation %.0f nm', ...
     row.n, row.meanCos, nullNote(N, row), 1000*row.rMedian));
 
-title(tl, sprintf('cross-colour pair: %s track %g  vs  %s track %g', chA, idA, chB, idB), ...
-    'FontWeight','bold');
+if ~isempty(tl)
+    title(tl, sprintf('cross-colour pair: %s track %g  vs  %s track %g', chA, idA, chB, idB), ...
+        'FontWeight','bold');
+end
 
 H.n = row.n; H.meanCos = row.meanCos; H.rMedian = row.rMedian; H.win = win;
 H.trackA = idA; H.trackB = idB;
 end
 
 % =================================================================================================
-function [ax, St] = intensityPanel(tl, x, y, ch, minSt, xl)
-ax = nexttile(tl); hold(ax,'on');
+function [ax, St] = intensityPanel(tl, ax, x, y, ch, minSt, xl)
+if isempty(ax), ax = nexttile(tl); end
+hold(ax,'on');
 St = struct('k',NaN,'fit',[],'text','no intensity recorded');
 if all(isnan(y))
     plot(ax, x, zeros(size(x)), '-', 'Color',[0.8 0.8 0.8]);

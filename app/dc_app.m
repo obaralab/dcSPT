@@ -53,8 +53,13 @@ cells = struct('folder',{}, 'name',{}, 'stacks',{}, 'C',[], 'D',[], 'Draw',[], '
 iCell = 0;
 % Thresholding follows SPTinMatlab: pool the DoG candidate qualities over sampled frames, then cut
 % at a top percentile of THAT distribution. The histogram is the control; the number is read off it.
-prm = struct('diamUm',0.4, 'thr',[10 10], 'thrMode','pct', 'topPct',[2 2], ...
-             'linkUm',0.6, 'gapUm',0.9, 'maxGap',1, 'maxFrames',[], 'minLen',5);
+% Per COLOUR, not per cell. The two channels are different fluorophores on different molecules:
+% they diffuse at different rates, bleach at different rates and are detected with different
+% reliability, so one link radius for both is right for at most one of them. Every one of these is
+% a two-element vector, [c1 c2].
+prm = struct('diamUm',[0.4 0.4], 'thr',[10 10], 'thrMode','pct', 'topPct',[2 2], ...
+             'linkUm',[0.6 0.6], 'gapUm',[0.9 0.9], 'maxGap',[1 1], ...
+             'maxFrames',[], 'minLen',[5 5]);
 pool = {[] []};            % the pooled candidate qualities, per colour
 % rMaxUm is deliberately generous. It caps which pairs are kept at all, and the far-field null is
 % the shell between rFarUm and rMaxUm — set it tight and there is no null to compare the near field
@@ -302,11 +307,16 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
         g = uigridlayout(parent,[3 1],'RowHeight',{92,'1x',82},'Padding',[8 8 8 8],'RowSpacing',6);
 
         cp = uigridlayout(g,[3 1],'RowHeight',{26,26,24},'Padding',[0 0 0 0],'RowSpacing',5);
-        r1 = uigridlayout(cp,[1 14],'ColumnWidth',{96,58,74,86,70,54,70,54,8,64,58,78,74,'1x'}, ...
-            'Padding',[0 0 0 0],'ColumnSpacing',5);
-        uilabel(r1,'Text','Spot diameter (µm)','HorizontalAlignment','right');
-        spnDiam = uieditfield(r1,'numeric','Value',prm.diamUm,'Limits',[0.05 5], ...
-            'ValueChangedFcn',@(s,e) onDiam(s.Value));
+        r1 = uigridlayout(cp,[1 15],'ColumnWidth',{92,48,48,72,84,44,44,8,56,54,76,72,'1x'}, ...
+            'Padding',[0 0 0 0],'ColumnSpacing',4);
+        % Per colour, like everything else: a longer emission wavelength has a wider PSF, so one
+        % spot diameter is right for at most one of the two.
+        uilabel(r1,'Text','Diameter (µm)','HorizontalAlignment','right');
+        spnDiam = gobjects(1,2);
+        spnDiam(1) = uieditfield(r1,'numeric','Value',prm.diamUm(1),'Limits',[0.05 5], ...
+            'Tooltip','c1 spot diameter', 'ValueChangedFcn',@(s,e) onDiam(1,s.Value));
+        spnDiam(2) = uieditfield(r1,'numeric','Value',prm.diamUm(2),'Limits',[0.05 5], ...
+            'Tooltip','c2 spot diameter', 'ValueChangedFcn',@(s,e) onDiam(2,s.Value));
         uilabel(r1,'Text','Threshold','HorizontalAlignment','right');
         ddMode = uidropdown(r1,'Items',{'Top %','Quality ≥'},'ItemsData',{'pct','qual'}, ...
             'Value',prm.thrMode, ...
@@ -362,12 +372,13 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
             'pct',[spnP1 spnP2],'thrLbl',[lblT1 lblT2]));
     end
 
-    function onDiam(v)
-        prm.diamUm = v;
-        pool = {[] []};                 % the candidate set depends on the diameter: the old pool is stale
+    function onDiam(i, v)
+        prm.diamUm(i) = v;
+        pool{i} = [];                   % this colour's candidate set depends on its diameter
         d = getappdata(fig,'detect');
-        say('spot diameter %.3g µm — the pooled quality is stale, pool again before trusting Top %%', v);
-        cla(d.hist(1)); cla(d.hist(2));
+        say('%s diameter %.3g µm — its pooled quality is stale, pool again before trusting Top %%', ...
+            chKey(i), v);
+        cla(d.hist(i));
         detectPreview();
     end
     function onThrMode(m)
@@ -446,7 +457,7 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
         d = getappdata(fig,'detect');
         for i = 1:2
             say('pooling %s candidate qualities…', St.C(i).key);
-            pool{i} = dc_pool_quality(St.stacks{i}, prm.diamUm, St.pxUm, 40, ...
+            pool{i} = dc_pool_quality(St.stacks{i}, pv(prm.diamUm,i), St.pxUm, 40, ...
                 struct('pages', St.C(i).pages));
         end
         say('pooled %d and %d candidates', numel(pool{1}), numel(pool{2}));
@@ -470,7 +481,7 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
             pg = St.C(i).pages(min(k, numel(St.C(i).pages)));
             raw = readPg(i, pg);
             thr = curThr(i);
-            xy = dc_detect(raw, prm.diamUm, St.pxUm, thr, struct());
+            xy = dc_detect(raw, pv(prm.diamUm,i), St.pxUm, thr, struct());
             out{i} = xy;
 
             % Keep the view the user set. cla + imagesc resets the limits, so zooming in and then
@@ -482,7 +493,7 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
             set(d.ax(i), 'DataAspectRatio',[1 1 1], 'YDir','reverse', ...
                          'XLim',[0.5 size(raw,2)+0.5], 'YLim',[0.5 size(raw,1)+0.5]);
             hold(d.ax(i),'on');
-            dc_draw(d.ax(i), 'spots', xy, (prm.diamUm/St.pxUm)/2, tern(i==1,[1 0.3 1],[0.3 1 0.4]));
+            dc_draw(d.ax(i), 'spots', xy, (pv(prm.diamUm,i)/St.pxUm)/2, tern(i==1,[1 0.3 1],[0.3 1 0.4]));
             hold(d.ax(i),'off');
             if ~isempty(xl), xlim(d.ax(i), xl); ylim(d.ax(i), yl); end
             title(d.ax(i), sprintf('%s  page %d  thr %.4g  %d spots', St.C(i).key, pg, thr, size(xy,1)));
@@ -531,32 +542,46 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
         g = uigridlayout(parent,[3 1],'RowHeight',{84,'1x',92},'Padding',[8 8 8 8],'RowSpacing',6);
 
         cp = uigridlayout(g,[3 1],'RowHeight',{26,26,22},'Padding',[0 0 0 0],'RowSpacing',5);
-        r1 = uigridlayout(cp,[1 14],'ColumnWidth',{72,56,92,56,100,56,74,56,8,96,104,86,78,'1x'}, ...
-            'Padding',[0 0 0 0],'ColumnSpacing',5);
+        r1 = uigridlayout(cp,[1 16], ...
+            'ColumnWidth',{62,46,46,78,46,46,86,44,44,68,44,44,8,88,84,'1x'}, ...
+            'Padding',[0 0 0 0],'ColumnSpacing',4);
         uilabel(r1,'Text','Link (µm)','HorizontalAlignment','right');
-        uieditfield(r1,'numeric','Value',prm.linkUm,'Limits',[0.01 20], ...
-            'ValueChangedFcn',@(s,e) setParam('linkUm',s.Value));
+        eLink1 = uieditfield(r1,'numeric','Value',prm.linkUm(1),'Limits',[0.01 20], ...
+            'Tooltip','c1 link radius', 'ValueChangedFcn',@(s,e) setPrm2('linkUm',1,s.Value));
+        eLink2 = uieditfield(r1,'numeric','Value',prm.linkUm(2),'Limits',[0.01 20], ...
+            'Tooltip','c2 link radius', 'ValueChangedFcn',@(s,e) setPrm2('linkUm',2,s.Value));
         uilabel(r1,'Text','Gap close (µm)','HorizontalAlignment','right');
-        uieditfield(r1,'numeric','Value',prm.gapUm,'Limits',[0 20], ...
-            'ValueChangedFcn',@(s,e) setParam('gapUm',s.Value));
+        eGap1 = uieditfield(r1,'numeric','Value',prm.gapUm(1),'Limits',[0 20], ...
+            'ValueChangedFcn',@(s,e) setPrm2('gapUm',1,s.Value));
+        eGap2 = uieditfield(r1,'numeric','Value',prm.gapUm(2),'Limits',[0 20], ...
+            'ValueChangedFcn',@(s,e) setPrm2('gapUm',2,s.Value));
         uilabel(r1,'Text','Max gap (frames)','HorizontalAlignment','right');
-        uieditfield(r1,'numeric','Value',prm.maxGap,'Limits',[0 20],'RoundFractionalValues',true, ...
-            'ValueChangedFcn',@(s,e) setParam('maxGap',s.Value));
+        eMg1 = uieditfield(r1,'numeric','Value',prm.maxGap(1),'Limits',[0 20],'RoundFractionalValues',true, ...
+            'Tooltip',['Frames a track may skip. Raising it holds tracks together but produces steps ' ...
+                       'spanning more than one timepoint, which cannot be paired — see the log.'], ...
+            'ValueChangedFcn',@(s,e) setPrm2('maxGap',1,s.Value));
+        eMg2 = uieditfield(r1,'numeric','Value',prm.maxGap(2),'Limits',[0 20],'RoundFractionalValues',true, ...
+            'ValueChangedFcn',@(s,e) setPrm2('maxGap',2,s.Value));
         uilabel(r1,'Text','Min length','HorizontalAlignment','right');
-        uieditfield(r1,'numeric','Value',prm.minLen,'Limits',[2 1e4],'RoundFractionalValues',true, ...
-            'Tooltip','Tracks shorter than this are hidden and excluded from the analysis (curation, not deletion).', ...
-            'ValueChangedFcn',@(s,e) onMinLen(s.Value));
+        eMl1 = uieditfield(r1,'numeric','Value',prm.minLen(1),'Limits',[2 1e4],'RoundFractionalValues',true, ...
+            'ValueChangedFcn',@(s,e) onMinLen(1,s.Value));
+        eMl2 = uieditfield(r1,'numeric','Value',prm.minLen(2),'Limits',[2 1e4],'RoundFractionalValues',true, ...
+            'ValueChangedFcn',@(s,e) onMinLen(2,s.Value));
         uilabel(r1,'Text','');
-        uilabel(r1,'Text','Frames (0 = all)','HorizontalAlignment','right');
-        uieditfield(r1,'numeric','Value',0,'Limits',[0 1e6],'RoundFractionalValues',true, ...
-            'ValueChangedFcn',@(s,e) setParam('maxFrames', tern(s.Value>0, s.Value, [])));
         uibutton(r1,'Text','Track both','FontWeight','bold','ButtonPushedFcn',@(s,e) runTracking());
-        btnPlayT = uibutton(r1,'Text','▶ Play','ButtonPushedFcn',@(s,e) onPlay());
+        uibutton(r1,'Text','Import…','Tooltip', ...
+            ['Load tracks that were made elsewhere — one spots CSV per colour, as SPTinMatlab ' ...
+             'writes them. Tracking is the slow part and a curated set is better than a re-derived one.'], ...
+            'ButtonPushedFcn',@(s,e) onImportTracks());
 
-        r2 = uigridlayout(cp,[1 8],'ColumnWidth',{'1x',120,104,74,96,74,96,86}, ...
-            'Padding',[0 0 0 0],'ColumnSpacing',6);
+        r2 = uigridlayout(cp,[1 9],'ColumnWidth',{'1x',118,96,70,88,70,86,80,86}, ...
+            'Padding',[0 0 0 0],'ColumnSpacing',5);
         sldT = uislider(r2,'Limits',[1 100],'Value',1,'MajorTicks',[], ...
             'ValueChangingFcn',@(s,e) showTrackFrame(round(e.Value)));
+        btnPlayT = uibutton(r2,'Text','▶ Play','ButtonPushedFcn',@(s,e) onPlay());
+        uieditfield(r2,'numeric','Value',0,'Limits',[0 1e6],'RoundFractionalValues',true, ...
+            'Tooltip','Frames to process, 0 = all.', ...
+            'ValueChangedFcn',@(s,e) setParam('maxFrames', tern(s.Value>0, s.Value, [])));
         % No view dropdown: all three are on screen at once. Each colour alone in grey is how a
         % detection is judged; the merge is how a pair is. Making them alternatives meant flipping
         % back and forth to answer two questions about the same frame.
@@ -598,8 +623,48 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
             'play',btnPlayT));
     end
 
-    function onMinLen(v)
-        prm.minLen = v;
+    function setPrm2(f, i, v), prm.(f)(i) = v; end
+    function v = pv(a, i), v = a(min(i, numel(a))); end   % a scalar setting still serves both
+
+    function onImportTracks()
+        assert(~isempty(St.C), 'dc_app:noCells', 'pick a folder first, so the colours are known');
+        f1 = pickCsv(sprintf('Spots CSV for %s', St.C(1).key));
+        if isempty(f1), return; end
+        f2 = pickCsv(sprintf('Spots CSV for %s', St.C(2).key));
+        if isempty(f2), return; end
+        R = cell(1,2); src = {f1, f2};
+        for i = 1:2
+            R{i} = dc_import_spots(src{i}, St.C(i), struct('pxUm', St.pxUm));
+            say('  %s: %d localizations, %d tracks from %s', R{i}.key, R{i}.nDets, R{i}.nTracks, ...
+                shortPath(src{i}));
+        end
+        D = dc_dataset('new', 'cell', St.C);
+        for i = 1:2, D = dc_dataset('addChannel', D, R{i}); end
+        St.Draw = D; St.D = D; St.rejected = []; St.prep = [];
+        applyCuration();
+        say('imported: %d spots, %d tracks (%d excluded)', height(D.spots), ...
+            numel(unique(D.spots.trackId(isfinite(D.spots.trackId)))), St.nDropped);
+        if all(isnan(D.spots.iTot))
+            say(['  NOTE: no intensity column in these files, so the bleaching panels will be ' ...
+                 'empty. Export a spots CSV that carries TOTAL_INTENSITY if you need step counts.']);
+        end
+        showTrackFrame(1);
+        tg.SelectedTab = t3;
+    end
+
+    function f = pickCsv(prompt)
+        f = '';
+        start = tern(isempty(St.folder), pwd, St.folder);
+        [nm, pth] = uigetfile({'*.csv','Spots CSV'}, prompt, start);
+        if isequal(nm,0), return; end
+        f = fullfile(pth, nm);
+    end
+
+    function p2 = shortPath(p1)
+        [~, n, e] = fileparts(p1); p2 = [n e];
+    end
+    function onMinLen(i, v)
+        prm.minLen(i) = v;
         applyCuration();
         showTrackFrame([]);
     end
@@ -611,9 +676,14 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
         if isempty(St.D), return; end
         if ~isfield(St,'rejected') || isempty(St.rejected), St.rejected = []; end
         S = St.Draw.spots;                       % always re-derive from the untouched build
-        keep = true(height(S),1);
-        n = groupcounts(S(isfinite(S.trackId),:), 'trackId');
-        short = n.trackId(n.GroupCount < prm.minLen);
+        % Each colour's own minimum: a dim channel with shorter tracks should not be judged by the
+        % bright one's standard, and one shared number silently favours whichever detects better.
+        n = groupcounts(S(isfinite(S.trackId),:), {'ch','trackId'});
+        short = [];
+        for q = 1:numel(St.C)
+            m = n.ch == St.C(q).key;
+            short = [short; n.trackId(m & n.GroupCount < prm.minLen(min(q,numel(prm.minLen))))]; %#ok<AGROW>
+        end
         drop = unique([short(:); St.rejected(:)]);
         blank = ismember(S.trackId, drop);
         S.trackId(blank) = NaN; S.trackLocal(blank) = NaN;
@@ -657,7 +727,7 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
         if isempty(pgA) || isempty(pgB), return; end
         A = readPg(1, pgA);  B = readPg(2, pgB);
         if t.paths.Value, tail = t.tail.Value; else, tail = 1; end
-        px = St.pxUm; rPx = (prm.diamUm/px)/2;
+        px = St.pxUm; rPx = [pv(prm.diamUm,1) pv(prm.diamUm,2)]/px/2;
         gam = t.gamma.Value;
 
         [xl, yl] = keepView(t.ax(1), size(A));
@@ -690,12 +760,12 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
             h = gobjects(0);
             if i == 1 || i == 3
                 hA = dc_draw(t.ax(i),'tracks',drawSrc(),tp,struct('ch',chKey(1),'colour',[1 0.45 1], ...
-                    'pxUm',px,'rPx',rPx,'tail',tail));
+                    'pxUm',px,'rPx',rPx(1),'tail',tail));
                 nA = hA.n; h = [h hA.paths hA.now];
             end
             if i == 2 || i == 3
                 hB = dc_draw(t.ax(i),'tracks',drawSrc(),tp,struct('ch',chKey(2),'colour',[0.45 1 0.5], ...
-                    'pxUm',px,'rPx',rPx,'tail',tail));
+                    'pxUm',px,'rPx',rPx(2),'tail',tail));
                 nB = hB.n; h = [h hB.paths hB.now];
             end
             t.hov{i} = h(isgraphics(h));
@@ -705,8 +775,8 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
         if isgraphics(t.sld), t.sld.Limits = [1 max(nTp,2)]; t.sld.Value = tp; end
         nDrop = 0; if isfield(St,'nDropped'), nDrop = St.nDropped; end
         t.lbl.Text = sprintf(['timepoint %d of %d · %d %s tracks and %d %s tracks visible · %d ' ...
-            'excluded (shorter than %d, or rejected)'], tp, nTp, nA, chKey(1), nB, chKey(2), ...
-            nDrop, prm.minLen);
+            'excluded (shorter than %d/%d, or rejected)'], tp, nTp, nA, chKey(1), nB, chKey(2), ...
+            nDrop, prm.minLen(1), prm.minLen(2));
     end
 
     function k = chKey(i)
@@ -851,10 +921,16 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
             axP(i) = uiaxes(pn); axP(i).Units='normalized'; axP(i).Position=[0.13 0.11 0.82 0.78];
         end
         host = uipanel(mn,'BorderType','none');       % the traces get the whole right half
+        % Built once. dc_pair_panel would otherwise make a new tiledlayout and three new axes for
+        % every pair, which measured at about half a second — most of what stepping cost.
+        tg3 = uigridlayout(host,[3 1],'RowHeight',{'1x','1x','1.1x'}, ...
+            'Padding',[2 2 2 2],'RowSpacing',3);
+        axTr = gobjects(1,3);
+        for i = 1:3, axTr(i) = uiaxes(tg3); end
 
         setappdata(fig,'pair', struct('host',host,'ax',axP,'lbl',lblPair,'k',0,'tp',1, ...
             'win',spnWin,'quiv',chkQuiv,'zoom',chkZoom,'sld',sldP,'tpLbl',lblTp, ...
-            'play',btnPlayP,'fps',spnFps,'timer',[],'view4',ddView4));
+            'play',btnPlayP,'fps',spnFps,'timer',[],'view4',ddView4,'axTr',axTr));
     end
 
     function onPairSlide(v)
@@ -910,12 +986,12 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
         pgA = pageFor(1, tpNow); pgB = pageFor(2, tpNow);
         if isempty(pgA) || isempty(pgB), return; end
         A = readPg(1, pgA);  B = readPg(2, pgB);
-        px = St.pxUm; rPx = (prm.diamUm/px)/2;
+        px = St.pxUm; rPx = [pv(prm.diamUm,1) pv(prm.diamUm,2)]/px/2;
 
         % the box the three panels share, so they are comparable at a glance
         xl = [0.5 size(A,2)+0.5]; yl = [0.5 size(A,1)+0.5];
         if pp.zoom.Value && ~isempty(sw)
-            pad = max(0.8/px, 3*rPx);
+            pad = max(0.8/px, 3*max(rPx));
             xs = [sw.xa; sw.xb]/px; ys = [sw.ya; sw.yb]/px;
             xl = [min(xs)-pad, max(xs)+pad]; yl = [min(ys)-pad, max(ys)+pad];
         end
@@ -934,15 +1010,15 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
             hold(ax,'on');
             if i == 1 || i == 3
                 dc_draw(ax,'tracks',drawSrc(),tpNow,struct('ch',chKey(1),'colour',cols{1}, ...
-                    'pxUm',px,'rPx',rPx,'tail',w,'tracks',idA));
+                    'pxUm',px,'rPx',rPx(1),'tail',w,'tracks',idA));
             end
             if i == 2 || i == 3
                 dc_draw(ax,'tracks',drawSrc(),tpNow,struct('ch',chKey(2),'colour',cols{2}, ...
-                    'pxUm',px,'rPx',rPx,'tail',w,'tracks',idB));
+                    'pxUm',px,'rPx',rPx(2),'tail',w,'tracks',idB));
             end
             if i == 3
                 hp = dc_draw(ax,'pair',drawSrc(),idA,idB,tpNow, ...
-                    struct('pxUm',px,'rPx',rPx,'tail',w));
+                    struct('pxUm',px,'rPx',mean(rPx),'tail',w));
                 if pp.quiv.Value && ~isempty(sw)
                     % Scale 0, autoscale off: the arrows are the real displacements in the image's
                     % own units. MATLAB would otherwise resize them to look tidy, which makes two
@@ -1048,14 +1124,17 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
         say('tracking both colours…');
         cel = struct('stack', St.stacks{1}, 'base', 'cell', 'stacks', struct());
         for i = 1:2, cel.stacks.(St.C(i).key) = St.stacks{i}; end
-        P = struct('diamUm',prm.diamUm, 'thrAbs',curThr(1), 'pxUm',St.pxUm, ...
-                   'linkUm',prm.linkUm, 'gapUm',prm.gapUm, 'maxGap',prm.maxGap);
-        if ~isempty(prm.maxFrames), P.maxFrames = prm.maxFrames; end
         % A cell, not a struct array: assigning a filled struct into repmat(struct(),1,2) fails with
         % "dissimilar structures" the moment the two have different fields.
         R = cell(1,2);
         for i = 1:2
-            Pi = P; Pi.thrAbs = curThr(i);        % each colour's own threshold, however it was set
+            % EVERY parameter indexed by colour. They are different fluorophores on different
+            % molecules — different diffusion, different bleaching, different detection reliability
+            % — so one link radius or one spot diameter is right for at most one of them.
+            Pi = struct('diamUm',pv(prm.diamUm,i), 'thrAbs',curThr(i), 'pxUm',St.pxUm, ...
+                        'linkUm',pv(prm.linkUm,i), 'gapUm',pv(prm.gapUm,i), ...
+                        'maxGap',pv(prm.maxGap,i));
+            if ~isempty(prm.maxFrames), Pi.maxFrames = prm.maxFrames; end
             R{i} = dc_process_cell(cel, St.C(i), Pi);
             say('  %s: %d detections, %d tracks over %d frames', R{i}.key, R{i}.nDets, R{i}.nTracks, R{i}.nFrames);
         end
@@ -1195,7 +1274,8 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
         if ~isempty(st), pp.tp = round(median(st.tp)); end
         setappdata(fig,'pair',pp);
         dtv = []; if isfinite(St.dtS), dtv = St.dtS; end
-        Hp = dc_pair_panel(St.D, St.R, k, struct('parent',pp.host,'null',St.N,'dtS',dtv));
+        Hp = dc_pair_panel(St.D, St.R, k, ...
+            struct('axes',pp.axTr,'null',St.N,'dtS',dtv));
         drawPairImage();
         pp = getappdata(fig,'pair');
         sh = '';
@@ -1235,7 +1315,14 @@ if isfield(opts,'folder') && ~isempty(opts.folder), loadFolder(opts.folder); end
     function v = getState(), v = St;  end
     function v = getParams(), v = prm; end
     function v = getCo(),     v = co;  end
-    function setParam(f,v), prm.(f) = v; end
+    function setParam(f,v)
+        % A scalar given to a per-colour setting means BOTH colours. Otherwise a script that says
+        % setParam('linkUm', 0.8) silently collapses the pair to one number and the second colour's
+        % value disappears — and nothing downstream would notice, because pv() tolerates a scalar.
+        per = {'diamUm','thr','topPct','linkUm','gapUm','maxGap','minLen'};
+        if any(strcmp(f, per)) && isscalar(v), v = [v v]; end
+        prm.(f) = v;
+    end
     function setThr(i,v), prm.thr(i) = v; end
     function setCo(f,v), co.(f) = v; end
     function onCal(which)

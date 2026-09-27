@@ -103,15 +103,30 @@ assert(est <= maxP, 'dc_comotion:tooManyPairs', ...
     ['%.3g simultaneous pairs, over the %.3g cap. Raise maxPairs, shorten the movie, or raise the ' ...
      'detection threshold — this grows as the square of the number of tracks alive at once.'], est, maxP);
 
-A = zeros(0,1); B = zeros(0,1); TP = zeros(0,1); RR = zeros(0,1); DT = zeros(0,1); CS = zeros(0,1);
-uA = zeros(0,2); uB = zeros(0,2);
-pA = zeros(0,2); pB = zeros(0,2);        % where each step STARTED, so a quiver needs no lookup
+% Collected per timepoint and concatenated ONCE. Growing ten arrays inside a loop over every
+% timepoint copies all of them on every iteration: on a 1500-frame cell that was the difference
+% between a second and a tenth of one, for arithmetic that had not changed.
+cA = cell(numel(tps),1); cB = cA; cTP = cA; cRR = cA; cDT = cA; cCS = cA;
+cuA = cA; cuB = cA; cpA = cA; cpB = cA;
+% When only cross-colour pairs are wanted, pair the two colours DIRECTLY rather than forming every
+% pair at the timepoint and throwing the same-colour half away. That is nA*nB comparisons instead of
+% m(m-1)/2, and it skips building an m x m logical at every one of thousands of timepoints.
+chNum = double(S.ch);
+crossOnly = (cls0 == "cross") && numel(unique(chNum)) == 2;
+c1 = min(chNum); 
 for k = 1:numel(tps)
     idx = find(g == k);
     m = numel(idx);
     if m < 2, continue; end
-    [i1, i2] = find(triu(true(m), 1));
-    a = idx(i1); b = idx(i2);
+    if crossOnly
+        ia = idx(chNum(idx) == c1); ib = idx(chNum(idx) ~= c1);
+        if isempty(ia) || isempty(ib), continue; end
+        a = repelem(ia, numel(ib));
+        b = repmat(ib, numel(ia), 1);
+    else
+        [i1, i2] = find(triu(true(m), 1));
+        a = idx(i1); b = idx(i2);
+    end
     dx = S.x(a) - S.x(b);  dy = S.y(a) - S.y(b);
     r  = hypot(dx, dy);
     in = r <= rMax;
@@ -122,16 +137,28 @@ for k = 1:numel(tps)
     la = hypot(ua(:,1),ua(:,2)); lb = hypot(ub(:,1),ub(:,2));
     c  = d ./ max(la .* lb, eps);
     c(la <= 0 | lb <= 0) = NaN;            % a zero-length step has no direction
-    A = [A; S.trackId(a)]; B = [B; S.trackId(b)]; %#ok<AGROW>
-    TP = [TP; repmat(tps(k), numel(a), 1)]; RR = [RR; r]; DT = [DT; d]; CS = [CS; c]; %#ok<AGROW>
-    uA = [uA; ua]; uB = [uB; ub]; %#ok<AGROW>
-    pA = [pA; S.x(a) S.y(a)]; pB = [pB; S.x(b) S.y(b)]; %#ok<AGROW>
+    cA{k} = S.trackId(a); cB{k} = S.trackId(b);
+    cTP{k} = repmat(tps(k), numel(a), 1); cRR{k} = r; cDT{k} = d; cCS{k} = c;
+    cuA{k} = ua; cuB{k} = ub;
+    cpA{k} = [S.x(a) S.y(a)]; cpB{k} = [S.x(b) S.y(b)];
+end
+A = vertcat(cA{:}); B = vertcat(cB{:}); TP = vertcat(cTP{:});
+RR = vertcat(cRR{:}); DT = vertcat(cDT{:}); CS = vertcat(cCS{:});
+uA = vertcat(cuA{:}); uB = vertcat(cuB{:});
+pA = vertcat(cpA{:}); pB = vertcat(cpB{:});
+if isempty(A)
+    A = zeros(0,1); B = A; TP = A; RR = A; DT = A; CS = A;
+    uA = zeros(0,2); uB = uA; pA = uA; pB = uA;
 end
 
-[uid, iu] = unique(S.trackId);                 % one row per track, not one per step
-chOf = containers.Map(num2cell(uid), cellstr(string(S.ch(iu))));
-chA = string(values(chOf, num2cell(A)));      % values() keeps the input's shape: already Nx1
-chB = string(values(chOf, num2cell(B)));
+% A lookup ARRAY indexed by track id, not a containers.Map: one hash lookup per step pair adds up
+% over tens of thousands of them, and track ids are small consecutive integers.
+[uid, iu] = unique(S.trackId);
+chNames = string(S.ch(iu));
+lut = strings(max(uid)+1, 1);
+lut(uid+1) = chNames;
+chA = lut(A+1);
+chB = lut(B+1);
 cls = repmat("same", numel(A), 1);
 cls(chA ~= chB) = "cross";
 
